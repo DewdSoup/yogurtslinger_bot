@@ -1,0 +1,116 @@
+{
+  "timestamp": 1765444159618,
+  "observationMinutes": 30.686666666666667,
+  "transactions": {
+    "total": 15741,
+    "buys": 2,
+    "sells": 0
+  },
+  "volume": {
+    "totalBuy": 1.176940973,
+    "totalSell": 0,
+    "netFlow": -1.176940973,
+    "buyRatePerMin": 0.03835349683901803
+  },
+  "wallets": {
+    "total": 4280,
+    "bots": 3144,
+    "manuals": 1136,
+    "botVolumeShare": 1
+  },
+  "tokens": {
+    "total": 553
+  },
+  "topBuyers": [
+    {
+      "wallet": "7MStjdWvDMBqTrMepvwQsvKnkNiTtpSvQwZoFcy5fuhk",
+      "buyVolume": 1.095083587,
+      "txCount": 1,
+      "isBot": true
+    },
+    {
+      "wallet": "8fiY8brSpPNVexCu9wSn9ijHP5Wp2ihfxaP6bnZ6hsQR",
+      "buyVolume": 0.081857386,
+      "txCount": 1,
+      "isBot": true
+    },
+    {
+      "wallet": "BUFFKUywSEHLCJHoo9FjgcvqSGDCULpG6ydpetAATRaH",
+      "buyVolume": 0,
+      "txCount": 16,
+      "isBot": true
+    },
+    {
+      "wallet": "Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA",
+      "buyVolume": 0,
+      "txCount": 248,
+      "isBot": true
+    },
+    {
+      "wallet": "AcHvEe32WbQBMkZKKe7wEoJQm6ft4xizifdShHTUCXA5",
+      "buyVolume": 0,
+      "txCount": 26,
+      "isBot": false
+    },
+    {
+      "wallet": "F8t8XjoWc71L8q5BgQMp4HQKvsRMn1Jtj6GiVN7BmWk8",
+      "buyVolume": 0,
+      "txCount": 1,
+      "isBot": true
+    },
+    {
+      "wallet": "7SxXnVDNCEeXJ3iErUaNBYnVdjNSqD6p2ci16DFokgMz",
+      "buyVolume": 0,
+      "txCount": 1,
+      "isBot": false
+    },
+    {
+      "wallet": "58XsbfzNd5hTfLBwc3S7fDzGWwJpL2CymNnBCs4xKBcX",
+      "buyVolume": 0,
+      "txCount": 1,
+      "isBot": true
+    },
+    {
+      "wallet": "2CL9NqL2A54pkaobqGqFt696w2b7tcWAr6EVJY9nTxZu",
+      "buyVolume": 0,
+      "txCount": 3,
+      "isBot": true
+    },
+    {
+      "wallet": "368hUMrA4GaCxTg4PsS6WKmRUKtA8tyiCSrmvUUYQMvX",
+      "buyVolume": 0,
+      "txCount": 3,
+      "isBot": true
+    },
+    {
+      "wallet": "GTqN4wDxrSPam155CqjLFkPniUEMuK3J5C5tN4X9Udoj",
+      "buyVolume": 0,
+      "txCount": 3,
+      "isBot": true
+    },
+    {
+      "wallet": "EPVKBPJAQJXmhbD9uTTWcenN6o5qNWhjRkeUmMryFpMr",
+      "buyVolume": 0,
+      "txCount": 26,
+      "isBot": false
+    },
+    {
+      "wallet": "WGmMkSsnghKe6PFAyDvafxQRTUa7WnUkry8pD6LsfGq",
+      "buyVolume": 0,
+      "txCount": 2,
+      "isBot": false
+    },
+    {
+      "wallet": "HPe4KDnLH9LzX23XR8jSSSUHXdQpE7tRT7A5WUaoJadC",
+      "buyVolume": 0,
+      "txCount": 3,
+      "isBot": false
+    },
+    {
+      "wallet": "3psZcs4393RncWs2FGjHm77ifwgZHipxh1PkivkpDMeh",
+      "buyVolume": 0,
+      "txCount": 1,
+      "isBot": true
+    }
+  ]
+}

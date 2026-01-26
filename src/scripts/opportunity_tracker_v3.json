@@ -1,0 +1,665 @@
+{
+  "savedAt": "2025-12-10T07:08:25.690Z",
+  "stats": {
+    "messages": 1174639,
+    "rpcCalls": 461302,
+    "priceChecks": 2825,
+    "tradesByVenue": {
+      "PUMPSWAP": 58366,
+      "RAYDIUM_V4": 5326,
+      "RAYDIUM_CLMM": 46607,
+      "METEORA_DLMM": 6015
+    },
+    "spreadsDetected": 0,
+    "actionableSpreads": 0,
+    "debug": {
+      "txFetched": 116314,
+      "txFailed": 33,
+      "txHadError": 0,
+      "mintsFound": 114446,
+      "poolsDiscovered": {
+        "PUMPSWAP": 2136,
+        "RAYDIUM_V4": 224,
+        "RAYDIUM_CLMM": 314,
+        "METEORA_DLMM": 194
+      },
+      "decodeAttempts": {
+        "PUMPSWAP": 360,
+        "RAYDIUM_V4": 128,
+        "RAYDIUM_CLMM": 98,
+        "METEORA_DLMM": 351
+      },
+      "decodeSuccess": {
+        "PUMPSWAP": 360,
+        "RAYDIUM_V4": 0,
+        "RAYDIUM_CLMM": 58,
+        "METEORA_DLMM": 0
+      },
+      "pricesCompared": 7,
+      "spreadRejected": 7
+    }
+  },
+  "multiVenueTokens": [
+    {
+      "mint": "Dfh5DzRgSvvCFDoYc2ciTkMrbDfRKybA4SoFbPmApump",
+      "pools": {
+        "PUMPSWAP": "2KFvejGmcwK2UVYggdTQbgQE4tMaoSw4Tyen2SHon4VF",
+        "RAYDIUM_V4": "8WwcNqdZjCY5Pt7AkhupAFknV2txca9sq6YBkGzLbvdt",
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "DV3VKvSe7DpE8K6sp8AaVRrnSD7yzwqje3aXUjrw74if"
+        ]
+      },
+      "score": 80,
+      "recentSpreads": []
+    },
+    {
+      "mint": "yG6bXPEFaUnGAEHHqH9H7t1VSfaK7YrggCqHy35pump",
+      "pools": {
+        "PUMPSWAP": "41KxdRa5MuvQb8kgfRVKAwE1mFRcjdzdw7PRHATreewf",
+        "RAYDIUM_V4": "4d2NqFxHSPkXgxa6DxpRCY2G6WK5v6ouKXXXu2NijKRf",
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": []
+      },
+      "score": 53,
+      "recentSpreads": []
+    },
+    {
+      "mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": "AVs9TA4nWDzfPJE9gGVNJMVhcQy3V9PGazuz33BfG2RA",
+        "RAYDIUM_CLMM": [
+          "2AXXcN6oN9bBT5owwmTH53C7QHUXvhLeu718Kqt8rvY2"
+        ],
+        "METEORA_DLMM": []
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "Ax8PSfCXxmxb8C8kYTzN5CPpTe6PyeZfFf8rrXNCjupx",
+      "pools": {
+        "PUMPSWAP": "4qxSqMh6iEdbdvtMp8r5MK2psAGKNk57PfGeVo2VhczQ",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "5hBPRC2y32ThoMvhXR9yrc2868RCzoTNQ9Bi4Hpez5Pz",
+          "8hixwxDGopn18gYJ33TBbxqcG3vCFtuUv9WdNXS25gAr"
+        ]
+      },
+      "score": 21,
+      "recentSpreads": []
+    },
+    {
+      "mint": "a3W4qutoEJA4232T2gwZUfgYJTetr96pU4SJMwppump",
+      "pools": {
+        "PUMPSWAP": "4qxSqMh6iEdbdvtMp8r5MK2psAGKNk57PfGeVo2VhczQ",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "5mehHz7wSvRbY7kAvXuxUf3FATymhfTKit2BiTyBpoSo"
+        ]
+      },
+      "score": 70,
+      "recentSpreads": []
+    },
+    {
+      "mint": "5TfqNKZbn9AnNtzq8bbkyhKgcPGTfNDc9wNzFrTBpump",
+      "pools": {
+        "PUMPSWAP": "Ghjs1h4yu4BZbzzd5V95zkKYLEdHpSdjNyma1zyxeSk9",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "2XkN2MPtiTp3qzMU5UbfFZT14rxvs5A4vXrj5eUZA1Wc",
+          "BMwKCRWeC8fDmWd9nxQyzxey2YNTzk4JazAHSXNBARdz"
+        ]
+      },
+      "score": 37,
+      "recentSpreads": []
+    },
+    {
+      "mint": "E8H6zfGirNuZ7JyrVnhbCitMPUvB8gKvS8NoULBNpump",
+      "pools": {
+        "PUMPSWAP": "Dp23JZRq5bneqNVFk47WEyzq3C72FsGBGij4QZMeRBiv",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "3vwsZELeP9fzLKXkL6gYvZ9eC9jktuJtFSTbLqM8owRz"
+        ]
+      },
+      "score": 46,
+      "recentSpreads": []
+    },
+    {
+      "mint": "vRseBFqTy9QLmmo5qGiwo74AVpdqqMTnxPqWoWMpump",
+      "pools": {
+        "PUMPSWAP": "6LtBM9GxMtmff1VY6jEV5U3UrMCSGtSuquhfnwWTmTLi",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "jw9yo5LKvGYdMisquK68JhVh7qh7KMM5v84S9kf6rFK"
+        ],
+        "METEORA_DLMM": []
+      },
+      "score": 51,
+      "recentSpreads": []
+    },
+    {
+      "mint": "C2omVhcvt3DDY77S2KZzawFJQeETZofgZ4eNWWkXpump",
+      "pools": {
+        "PUMPSWAP": "GC1uTsxrrLAuWby3uWSEMjUXhJMJhhv1SXJ9A1jHvyxp",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "AdeZHSAqr1dxL8aqZPUgqM7M6yegJ8RjsTwBXBxM86oP"
+        ]
+      },
+      "score": 70,
+      "recentSpreads": []
+    },
+    {
+      "mint": "METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL",
+      "pools": {
+        "PUMPSWAP": "26M5M3nwgaKE4zavkD3zEtYs5hJWdxe6xBwpdtsLHy1o",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "A6c5Pt1U4m8WNMjnHKUEkCiBn8HoGzkvymD9UT5GVMbD",
+          "5hbf9JP8k5zdrZp9pokPypFQoBse5mGCmW6nqodurGcd"
+        ]
+      },
+      "score": 56,
+      "recentSpreads": []
+    },
+    {
+      "mint": "85wiEiRVoBKcLWvn7sUJQ5dNndddC1rYsZAn21p3pump",
+      "pools": {
+        "PUMPSWAP": "9kQXsYHroik5QgYCFmeK9Y4YNHePwWthvJWQ5iuufbYT",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "jU2iKrqKq6WvmU4NjtUDYcogy6i2TEdmKn5fD43krHu"
+        ]
+      },
+      "score": 33,
+      "recentSpreads": []
+    },
+    {
+      "mint": "DhVngVetxcmpgjgeaiVuwoEnBD8QsgLXBYgZhLDspump",
+      "pools": {
+        "PUMPSWAP": "8Q7QR5rDGNP2SvdwQo6DqVmd3V5waTusgj8sJfvJ9btP",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "2JvnQ5E1JcAXYbrTq1b55S39dks37YSJaSc61EoFZbg7"
+        ]
+      },
+      "score": 70,
+      "recentSpreads": []
+    },
+    {
+      "mint": "Gka1TQEevBbVw4W9K15ER96ZzKByMTb6TBMQzWFEpump",
+      "pools": {
+        "PUMPSWAP": "7RewgB9eXiLbaFdLU14cQLY46wH4Ccn46DxsMh51iGay",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "Aumfa36gZwjPZMFdgProAJY55P2bUVxJHydcwPPXWLjs"
+        ]
+      },
+      "score": 56,
+      "recentSpreads": []
+    },
+    {
+      "mint": "JDzPbXboQYWVmdxXS3LbvjM52RtsV1QaSv2AzoCiai2o",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "GGZtqoqscbx81ycwGJ8KQEKWuN9BKLhyXPf6VSiRAMgi"
+        ],
+        "METEORA_DLMM": [
+          "EXXfbVutbuexDZtPw8pkSvWxLFoUMBHd544CAGkmtPZm"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "Ep4kgeqi6T5JrdJTbiXQcAjY3ZDAWh6meavJok9Epump",
+      "pools": {
+        "PUMPSWAP": "Asf6P34diYXYeGG8aYSu9hoRJuxt93TFQTephXyMAL5q",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "8p3oJXXYUJQDF61P59fgLGNmdCruaMESCfNXbHh6xCzS"
+        ]
+      },
+      "score": 38,
+      "recentSpreads": []
+    },
+    {
+      "mint": "7Y2TPeq3hqw21LRTCi4wBWoivDngCpNNJsN1hzhZpump",
+      "pools": {
+        "PUMPSWAP": "CtQGgBzjr7eGAba7EF5LgCck7MgvXFAJk1R6iH2fWpHx",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "CpiCS9ajhvxuRuSQ9hmkJygdRWoV2zo7e8Hs1oGDdoCt"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "C9W11rfTnqkR8eTtyjgHEi5Pkh1gTiq9Hg7txTurk1dr"
+        ],
+        "METEORA_DLMM": [
+          "9ToMYnmEeYKc1AWYAFo8yjPKM1bt3vPhgw1U6qh9RxBd"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "BCXpjsHYmgVpRKdv4EQv1RARhYagnnwPkJjYbvM6bonk",
+      "pools": {
+        "PUMPSWAP": "57hnepn3grPACamPur9oAW8pzt3YBcXM7L77xsqHEJQp",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "AQAGYQsdU853WAKhXM79CgNdoyhrRwXvYHX6qrDyC1FS"
+        ],
+        "METEORA_DLMM": [
+          "7BivGBt8GE7jtP3Mku3uLbixXAgqkw5a47Fv3wyZjq91",
+          "5AhLrqAwtQ2rhPo6MZ72DjPRsvoHkYwfnXgEy98gsuLJ",
+          "81sLpPwoPx6Bn8nKsvMvEJA2AGSuySFikdZuvgc5aE6i"
+        ]
+      },
+      "score": 69,
+      "recentSpreads": []
+    },
+    {
+      "mint": "1PNnDdzy3hfKaUW6L35fmwDUwDkuCjwJqaBkAeubUTT",
+      "pools": {
+        "PUMPSWAP": "9jTdsgN2vCHfVHJS5NFqqM71voQDSqst3ZruUsTZa19h",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "CqUR3n4TP4Va1cddtY2DkaEktEfyUk9NTSzUWVv3RvdX"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "27Qgup4Nt3sQ4bpxaFEvLwprGUfdMRqtYgmVcyvLpump",
+      "pools": {
+        "PUMPSWAP": "6tUronCdFTdxD5UcoU9rPAX7LyoGzji6tE4bzCQaxo5u",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "EynWAG5LHPce2ACyQ2z7zMPMuPykG8uPfL8hnpRwZAtH"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+      "pools": {
+        "PUMPSWAP": "5DJSBgMEb4xofQAM6kLBN1WZgGosAPt1bZFJ3iBx3euT",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "45ssPkUQs1ssbeDqxD2mZrMdJYAXF7GyQyhS5xDXuWC5"
+        ],
+        "METEORA_DLMM": [
+          "3VsrgEfHMkipoJPhfsq9NDpw27niKcYohYyrFh3bD2gP"
+        ]
+      },
+      "score": 36,
+      "recentSpreads": []
+    },
+    {
+      "mint": "BkEvgC9nfhy9TpCJDPUGy9ANXbYMxosfmLzk35gqpump",
+      "pools": {
+        "PUMPSWAP": "Dp23JZRq5bneqNVFk47WEyzq3C72FsGBGij4QZMeRBiv",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "FsrHt4LFHYxJnCPbeGb96QSsg47GkTLpRis1ab3utdaA",
+          "6YMo83MnwRgQVCTpbpT2hBjQYhp7PrrZA8Z54omfbdQu"
+        ]
+      },
+      "score": 58,
+      "recentSpreads": []
+    },
+    {
+      "mint": "EfPoo4wWgxKVToit7yX5VtXXBrhao4G8L7vrbKy6pump",
+      "pools": {
+        "PUMPSWAP": "Csqt5aXbzLcSd13DpY6AYLtRKcU5q1NztAPaM67eLxRo",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "F9KbYJgwSW3a56QnudQMrmGqhf33YnNx7aekcQnFjtD3"
+        ]
+      },
+      "score": 22,
+      "recentSpreads": []
+    },
+    {
+      "mint": "U36pF4HwUrh4fGWLwVk4PEw5w7QNVZHqV3gVrRXpump",
+      "pools": {
+        "PUMPSWAP": "C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "CSLPDTEhxmX3Nx215qaNM1PUmd9WzdMd4zpTDkqaedQi"
+        ]
+      },
+      "score": 34,
+      "recentSpreads": []
+    },
+    {
+      "mint": "WETZjtprkDMCcUxPi9PfWnowMRZkiGGHDb9rABuRZ2U",
+      "pools": {
+        "PUMPSWAP": "529QgZe4v7chYXKGeT1M6y7rDhJdMm71SNtJmAn9cHoW",
+        "RAYDIUM_V4": "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2",
+        "RAYDIUM_CLMM": [
+          "5VEDoqrstr11XFPJBmQwD4MXbQQnpnGMKrKB468kPFpq",
+          "14825hHQjhTpDMLTmJadsEh3W4MbQSrRdLQTEQHY7H2q"
+        ],
+        "METEORA_DLMM": [
+          "CgyddEf8geWjwUSQLkaDr5EKsmtusoF4bWQVm1CbetEX"
+        ]
+      },
+      "score": 90,
+      "recentSpreads": []
+    },
+    {
+      "mint": "CSrwNk6B1DwWCHRMsaoDVUfD5bBMQCJPY72ZG3Nnpump",
+      "pools": {
+        "PUMPSWAP": "FMEQiZ4iuj75PM4aQCAjUXpHR9g4tZPbhNAUAHoYQ4fb",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "5SLCaLqmEmU94DhFYuaoRD7EfRy6Mt2cGDKEQBhvPema",
+          "A3Zz1kFaccGrN69o7YdTXcJXoKtqVkJERLvotf9GySwe"
+        ],
+        "METEORA_DLMM": [
+          "AWK12VsFbDZEBVLyP54US7cU9XXsSqsonnzm8x3o27j5",
+          "A2z9rsyMgF2ug9oEmeBZpRiTmcxAXgB9geTMrxuYZS19",
+          "9kDvZc2kduRywBfds3MU3TKRBGx6vGHsT2B7S4M9UTCx"
+        ]
+      },
+      "score": 80,
+      "recentSpreads": []
+    },
+    {
+      "mint": "KMNo3nJsBXfcpJTVhZcXLW7RmTwTt4GVFE7suUBo9sS",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "72jQFwjd14BEhyDfdQsH7D2hS5dN1H6bzsikjkyHyx2D",
+          "4Zd8Bhpy9GWCet4ijrpJt6D2GSpbd1o9LFZscjG8ViFo"
+        ],
+        "METEORA_DLMM": [
+          "4UopaeYzxPyHtSYcvb1Cj9U3Z8uUf3yngsrTExqi2JAh",
+          "BTFhCf6JhNEaPoXQUcpXNv6XFUmgHfeoY9cz2cux4G74"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "AQAGYQsdU853WAKhXM79CgNdoyhrRwXvYHX6qrDyC1FS"
+        ],
+        "METEORA_DLMM": [
+          "7hZQ3QmsocJJLuHrw39R9XqZNzt4BmBBNVNSnvJExtqA"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "2uoKbPEidR7KAMYtY4x7xdkHXWqYib5k4CutJauSL3Mc"
+        ],
+        "METEORA_DLMM": [
+          "BoeMUkCLHchTD31HdXsbDExuZZfcUppSLpYtV3LZTH6U"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "DvjbEsdca43oQcw2h3HW1CT7N3x5vRcr3QrvTUHnXvgV",
+      "pools": {
+        "PUMPSWAP": "knMcqjFvHn3FdLrcJAAjFRoAA3v2hA4GQFrntLNYyg5",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "HAb26kxRVZBLAeVokuhSyfhTes7YLiD6GMT8X2c8DmH2"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": "Bzc9NZfMqkXR6fz1DBph7BDf9BroyEf6pnzESP7v5iiw",
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "6wJ7W3oHj7ex6MVFp2o26NSof3aey7U8Brs8E371WCXA",
+          "4Dvr3ghgphp4aTAsB34fmPP9Uk6e6xui6PbPaNiAHqRo"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "9AvytnUKsLxPxFHFqS6VLxaxt5p6BhYNr53SD2Chpump",
+      "pools": {
+        "PUMPSWAP": "DMAFL613XTipuA3jFNYczavWT7XsiYf9cR3qmRMZQhB6",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "TYNiHS3EdCENUqAEJp9grPGfQewQYfgggSNxb8j2ixn"
+        ],
+        "METEORA_DLMM": [
+          "3d8m2UMTudV4kW1WbjFzRVV9fbBmWVCfbCiB3wMJapZw",
+          "Da6gBAjx2G4V1zbk7DNkKfDAzk3VVxS3aCoe5QN3TbxJ",
+          "CNU1FQNdm2RXUotU8sw7HttcN5WsXVfsn28c8NDEvEN7"
+        ]
+      },
+      "score": 80,
+      "recentSpreads": []
+    },
+    {
+      "mint": "8J69rbLTzWWgUJziFY8jeu5tDwEPBwUz4pKBMr5rpump",
+      "pools": {
+        "PUMPSWAP": "Eh2w6ki2mpTj3wRgZfDZomBpfSqU2Di8FxV1DyH2rZMW",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "HXBohUFopM7TnpShycB5rxuBuPgxGKzKgZ1NNa344NSb",
+          "63ChtT5vH7YBnryKQJLUfRgY4ju7McntSq2v5UuHkuZH"
+        ]
+      },
+      "score": 38,
+      "recentSpreads": []
+    },
+    {
+      "mint": "GSmAEgz8ntQjCo8Nk8NYVAJTTc8ioG8Y3fXh32m9pump",
+      "pools": {
+        "PUMPSWAP": "7xXxypBnggWfr6fe5yqomxpip9KMs6PNT37GL9va91sn",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "CxaHY4kRVd6yv6KH6u5uvmMU9JAjpVUSg9mqtJrmdBmb"
+        ]
+      },
+      "score": 70,
+      "recentSpreads": []
+    },
+    {
+      "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "GQsPr4RJk9AZkkfWHud7v4MtotcxhaYzZHdsPCg9vNvW"
+        ],
+        "METEORA_DLMM": [
+          "3C5YE97HADPDxZehYq9Cis8AXr9aNyrUsczKzE1nDbW9",
+          "71HuFmuYAFEFUna2x2R4HJjrFNQHGuagW3gUMFToL9tk"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "2wnQqTuXKjpK12mPdp277roqK42LDFvPQXmVeJhyWsex"
+        ],
+        "METEORA_DLMM": [
+          "7gj8L6q7kePSTUuJpx6Es4Z9FkWaKnW1YfKzYwnQFtVB",
+          "J7z6TZgWecZughSLJ41FsttUBTjH5oX3CQ5ZmD182BpD"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "FT6ZnLbmaQbUmxbpe69qwRgPi9tU8QGY8S7gqt4Wbonk",
+      "pools": {
+        "PUMPSWAP": "57hnepn3grPACamPur9oAW8pzt3YBcXM7L77xsqHEJQp",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "HZa7yfrQRnQFQTBgnBh52Tetg7iDXabSpo1TiFVaLJzh"
+        ]
+      },
+      "score": 26,
+      "recentSpreads": []
+    },
+    {
+      "mint": "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "72jQFwjd14BEhyDfdQsH7D2hS5dN1H6bzsikjkyHyx2D"
+        ],
+        "METEORA_DLMM": [
+          "53RSBX3tsax8KLnEhm8ahScK1khySNPhHFSTPoZpZq2J"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": "ZfvDXXUhZDzDVsapffUyXHj9ByCoPjP4thL6YXcZ9ix",
+        "RAYDIUM_CLMM": [
+          "6L6bPMCd9YK4Thseym9hosLVdGD1GdSXLpif2YbNyw9a"
+        ],
+        "METEORA_DLMM": []
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
+      "pools": {
+        "PUMPSWAP": "9qKxzRejsV6Bp2zkefXWCbGvg61c3hHei7ShXJ4FythA",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "B4Vwozy1FGtp8SELXSXydWSzavPUGnJ77DURV2k4MhUV",
+          "7yqLegM8nUZQh6i2hEV57xgGaED1R26WmEzKsX55tyD"
+        ],
+        "METEORA_DLMM": [
+          "DdMA1cHcHEqYfttc1z1sJEY978CcU1pyjNuTWTNmdvzU"
+        ]
+      },
+      "score": 52,
+      "recentSpreads": []
+    },
+    {
+      "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+      "pools": {
+        "PUMPSWAP": null,
+        "RAYDIUM_V4": "HVNwzt7Pxfu76KHCMQPTLuTCLTm6WnQ1esLv4eizseSv",
+        "RAYDIUM_CLMM": [
+          "5gTCtEZ7z4QfBQm9Axk7PReES72fXpKAsLMhgDhBu7wf",
+          "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj"
+        ],
+        "METEORA_DLMM": [
+          "6oFWm7KPLfxnwMb3z5xwBoXNSPP3JJyirAPqPSiVcnsp",
+          "AtcGozT6i1GR3wJAjVwRwmt7qbHqZrBUqKs2DcMAKoVe"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "CkTFDNGUtw58dBDEnMD9RW3tjTVKaoVXctcXdq8Gpump",
+      "pools": {
+        "PUMPSWAP": "3cWtUtmhYhLdWrHXUnNgXoyYVvFC3dEUkM5HCA3YPqv4",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "2tAy2bMBpbVMFnT5kZeTpfYKreghbmUvEydPYSsgSpv5"
+        ]
+      },
+      "score": 0,
+      "recentSpreads": []
+    },
+    {
+      "mint": "Ce2gx9KGXJ6C9Mp5b5x1sn9Mg87JwEbrQby4Zqo3pump",
+      "pools": {
+        "PUMPSWAP": "C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [
+          "4L1TsKtPjE1Lc1tgZzXydTGMDENAJG9xPpCjcZvE1qGm"
+        ],
+        "METEORA_DLMM": []
+      },
+      "score": 68,
+      "recentSpreads": []
+    },
+    {
+      "mint": "F7pB3ZdfBnyFw2LRHydWEn9BmhEa5XihXLjhySFRpump",
+      "pools": {
+        "PUMPSWAP": "2pA1GMh9WbPtURmr6Rt5oxNs6RdpLzxJphSJQcdyaNFq",
+        "RAYDIUM_V4": null,
+        "RAYDIUM_CLMM": [],
+        "METEORA_DLMM": [
+          "3KmbWT4y3RcU6sLjjiykrZdA9tbLUNSLvE2P2W4QqFEt"
+        ]
+      },
+      "score": 60,
+      "recentSpreads": []
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "timestamp": 1765439854393,
+  "totalTxs": 15741,
+  "tokensWithActivity": 553,
+  "validSwarms": 108,
+  "triggerStats": {
+    "medianSol": 1.00989016,
+    "pctManual": 39.8
+  },
+  "latencyStats": {
+    "medianGapSlots": 2,
+    "medianGapMs": 800
+  },
+  "volumeStats": {
+    "medianFollowerVolume": 2.544610379
+  }
+}

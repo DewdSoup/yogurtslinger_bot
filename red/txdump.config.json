@@ -1,0 +1,9 @@
+{
+  "rpcUrl": "https://mainnet.helius-rpc.com/?api-key=2bb675f2-573f-4561-b57f-d351db310e5a",
+  "outFile": "./debug/txdump.ndjson",
+  "signatures": [
+    "GBPQiqgbVZBWMKbi73j2nVX5WAkGYFbRPdQnjrjsuki49JAQWhJbyJqqKc3tYYo2XgSfknVDHvkz1nNL2P4wzXV"
+  ],
+  "includeJsonParsed": true,
+  "maxSupportedTransactionVersion": 0
+}

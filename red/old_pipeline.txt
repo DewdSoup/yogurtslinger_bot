@@ -1,0 +1,1036 @@
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /etc/yogurtslinger/yogurtslinger.env /etc/yogurtslinger/yogurtslinger.env.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /etc/yogurtslinger/yogurtslinger.env
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/yogurtslinger/yogurtslinger.env
+sudo chown root:root /etc/yogurtslinger/yogurtslinger.env
+sudo chmod 0644 /etc/yogurtslinger/yogurtslinger.env
+# ============================================
+# YOGURTSLINGER PIPELINE - ENV CONFIG
+# ============================================
+
+# ---- Data directories ----
+LEDGER_DIR=/mnt/ledger/ledger
+ACCOUNTS_DIR=/mnt/accounts/accounts
+
+# Snapshot archives (*.tar.zst)
+SNAPSHOT_ARCHIVE_DIR=/mnt/ledger/ledger/remote
+
+# ---- Logs ----
+LOG_DIR=/mnt/ledger/logs
+LEDGER_LOG_FILE=/mnt/ledger/logs/agave-validator.log
+JITO_LOG_FILE=/mnt/ledger/logs/jito-shredstream.log
+
+# ---- Binaries ----
+# Stable build (currently working for you)
+AGAVE_VALIDATOR_BIN=/home/dudesoup/agave-bin/v3.0.12/bin/agave-validator
+JITO_SHREDSTREAM_PROXY_BIN=/usr/local/bin/jito-shredstream-proxy
+
+# ---- Keys (DO NOT CAT CONTENTS) ----
+IDENTITY_KEYPAIR=/home/dudesoup/jito/keys/identity.json
+JITO_SHREDS_AUTH_KEYPAIR=/home/dudesoup/jito/keys/jito-shreds-auth.json
+JITO_BUNDLE_KEYPAIR=/home/dudesoup/jito/keys/jito-bundles.json
+HOT_WALLET_KEYPAIR=/home/dudesoup/jito/keys/yogurtslinger-hot.json
+
+# ---- Geyser (Yellowstone gRPC) ----
+GEYSER_CONFIG=/home/dudesoup/geyser-config.json
+AGAVE_ENABLE_GEYSER=1
+
+# ---- Cluster ----
+ENTRYPOINTS="entrypoint.mainnet-beta.solana.com:8001 entrypoint2.mainnet-beta.solana.com:8001 entrypoint3.mainnet-beta.solana.com:8001"
+KNOWN_VALIDATORS="5D1fNXzvv5NjV1ysLjirC4WY92RNsVH18vjmcszZd8on 7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2 GdnSyH3YtwcxFvQrVVJMm1JhTS4QVX7MFsX56uJLUfiZ DE1bawNcRJB9rVm3buyMVfr8mBEoyyu73NBovf2oXJsJ"
+EXPECTED_GENESIS_HASH=5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d
+
+# ---- Snapshot policy (AUTO; no daily edits) ----
+AGAVE_NO_SNAPSHOT_FETCH=0
+AGAVE_ONLY_KNOWN_RPC=1
+
+# If down briefly, reuse local; if down long, download.
+AGAVE_MAX_LOCAL_SNAPSHOT_AGE=40000
+
+AGAVE_MIN_SNAPSHOT_DOWNLOAD_SPEED=5242880
+AGAVE_MAX_SNAPSHOT_DOWNLOAD_ABORT=10
+AGAVE_NO_GENESIS_FETCH=1
+
+# ---- Accounts index performance (CRITICAL) ----
+# Goal: keep index in RAM to avoid multi-hour disk-backed rebuilds.
+# 100000 MB = 100 GB (safe starting point on 512 GB host).
+AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB=100000
+
+# ---- Diagnostics ----
+RUST_BACKTRACE=1
+
+# ---- Jito / ShredStream (Albuquerque => SLC primary, NY backup) ----
+JITO_BLOCK_ENGINE_URL=https://mainnet.block-engine.jito.wtf
+JITO_SHREDSTREAM_REGIONS=slc,ny
+JITO_DEST_IP_PORTS=127.0.0.1:8002
+JITO_SHREDSTREAM_GRPC_PORT=11000
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /home/dudesoup/agave-bin/start-validator.sh /home/dudesoup/agave-bin/start-validator.sh.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /home/dudesoup/agave-bin/start-validator.sh /home/dudesoup/agave-bin/start-validator.sh.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /home/dudesoup/agave-bin/start-validator.sh
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /home/dudesoup/agave-bin/start-validator.sh
+sudo chown dudesoup:dudesoup /home/dudesoup/agave-bin/start-validator.sh
+sudo chmod 0755 /home/dudesoup/agave-bin/start-validator.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="/etc/yogurtslinger/yogurtslinger.env"
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "Missing env file: $ENV_FILE" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+[[ -x "${AGAVE_VALIDATOR_BIN:-}" ]] || { echo "Missing/invalid AGAVE_VALIDATOR_BIN: ${AGAVE_VALIDATOR_BIN:-}" >&2; exit 1; }
+[[ -f "${IDENTITY_KEYPAIR:-}"   ]] || { echo "Missing IDENTITY_KEYPAIR: ${IDENTITY_KEYPAIR:-}" >&2; exit 1; }
+[[ -d "${LEDGER_DIR:-}"         ]] || { echo "Missing LEDGER_DIR: ${LEDGER_DIR:-}" >&2; exit 1; }
+[[ -d "${ACCOUNTS_DIR:-}"       ]] || { echo "Missing ACCOUNTS_DIR: ${ACCOUNTS_DIR:-}" >&2; exit 1; }
+[[ -d "${SNAPSHOT_ARCHIVE_DIR:-}" ]] || { echo "Missing SNAPSHOT_ARCHIVE_DIR: ${SNAPSHOT_ARCHIVE_DIR:-}" >&2; exit 1; }
+
+if [[ "${AGAVE_ENABLE_GEYSER:-0}" == "1" ]]; then
+  [[ -f "${GEYSER_CONFIG:-}" ]] || { echo "AGAVE_ENABLE_GEYSER=1 but GEYSER_CONFIG missing: ${GEYSER_CONFIG:-}" >&2; exit 1; }
+fi
+
+# Diagnostics (optional)
+if [[ -n "${RUST_BACKTRACE:-}" ]]; then export RUST_BACKTRACE; fi
+if [[ -n "${RUST_LOG:-}" ]]; then export RUST_LOG; fi
+
+mkdir -p "$(dirname "$LEDGER_LOG_FILE")"
+
+echo "Starting agave-validator..."
+echo "  bin:             $AGAVE_VALIDATOR_BIN"
+echo "  identity:        $IDENTITY_KEYPAIR"
+echo "  ledger:          $LEDGER_DIR"
+echo "  accounts:        $ACCOUNTS_DIR"
+echo "  archives dir:    $SNAPSHOT_ARCHIVE_DIR"
+echo "  rpc:             127.0.0.1:8899"
+echo "  gossip:          8001"
+echo "  dynports:        8002-8027"
+echo "  geyser enabled:  ${AGAVE_ENABLE_GEYSER:-0}"
+echo "  RUST_BACKTRACE:  ${RUST_BACKTRACE:-<unset>}"
+echo "  log file:        $LEDGER_LOG_FILE"
+
+args=(
+  --identity "$IDENTITY_KEYPAIR"
+  --ledger "$LEDGER_DIR"
+  --accounts "$ACCOUNTS_DIR"
+  --log "$LEDGER_LOG_FILE"
+
+  --expected-genesis-hash "$EXPECTED_GENESIS_HASH"
+
+  --snapshots "$LEDGER_DIR"
+  --full-snapshot-archive-path "$SNAPSHOT_ARCHIVE_DIR"
+  --incremental-snapshot-archive-path "$SNAPSHOT_ARCHIVE_DIR"
+  --use-snapshot-archives-at-startup when-newest
+
+  --private-rpc
+  --full-rpc-api
+  --rpc-bind-address 127.0.0.1
+  --rpc-port 8899
+
+  --gossip-port 8001
+  --dynamic-port-range 8002-8027
+
+  --wal-recovery-mode skip_any_corrupted_record
+  --no-voting
+  --no-poh-speed-test
+  --no-port-check
+
+  --limit-ledger-size 50000000
+  --accounts-index-scan-results-limit-mb 8192
+)
+
+# Snapshot download controls
+if [[ "${AGAVE_NO_SNAPSHOT_FETCH:-0}" == "1" ]]; then
+  args+=( --no-snapshot-fetch )
+fi
+if [[ "${AGAVE_ONLY_KNOWN_RPC:-0}" == "1" ]]; then
+  args+=( --only-known-rpc )
+fi
+if [[ -n "${AGAVE_MAX_LOCAL_SNAPSHOT_AGE:-}" ]]; then
+  args+=( --maximum-local-snapshot-age "$AGAVE_MAX_LOCAL_SNAPSHOT_AGE" )
+fi
+if [[ -n "${AGAVE_MIN_SNAPSHOT_DOWNLOAD_SPEED:-}" ]]; then
+  args+=( --minimal-snapshot-download-speed "$AGAVE_MIN_SNAPSHOT_DOWNLOAD_SPEED" )
+fi
+if [[ -n "${AGAVE_MAX_SNAPSHOT_DOWNLOAD_ABORT:-}" ]]; then
+  args+=( --maximum-snapshot-download-abort "$AGAVE_MAX_SNAPSHOT_DOWNLOAD_ABORT" )
+fi
+if [[ "${AGAVE_NO_GENESIS_FETCH:-0}" == "1" ]]; then
+  args+=( --no-genesis-fetch )
+fi
+
+# Accounts index in RAM (correct flag name for Solana/Agave-style validators)
+if [[ -n "${AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB:-}" ]]; then
+  if "$AGAVE_VALIDATOR_BIN" --help 2>/dev/null | grep -q -- "--accounts-index-memory-limit-mb"; then
+    args+=( --accounts-index-memory-limit-mb "$AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB" )
+    echo "  accounts index memory limit: ${AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB} MB"
+  else
+    echo "WARN: AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB set but --accounts-index-memory-limit-mb not supported by this agave-validator build"
+  fi
+fi
+
+# Entry points
+for ep in ${ENTRYPOINTS}; do
+  args+=( --entrypoint "$ep" )
+done
+
+# Known validators
+for kv in ${KNOWN_VALIDATORS}; do
+  args+=( --known-validator "$kv" )
+done
+
+# Geyser
+if [[ "${AGAVE_ENABLE_GEYSER:-0}" == "1" ]]; then
+  args+=( --geyser-plugin-config "$GEYSER_CONFIG" )
+fi
+
+exec "$AGAVE_VALIDATOR_BIN" "${args[@]}"
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ 
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /home/dudesoup/jito/shredstream-proxy.sh /home/dudesoup/jito/shredstream-proxy.sh.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /home/dudesoup/jito/shredstream-proxy.sh
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /home/dudesoup/jito/shredstream-proxy.sh
+sudo chown dudesoup:dudesoup /home/dudesoup/jito/shredstream-proxy.sh
+sudo chmod 0755 /home/dudesoup/jito/shredstream-proxy.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="/etc/yogurtslinger/yogurtslinger.env"
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "Missing env file: $ENV_FILE" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+[[ -x "${JITO_SHREDSTREAM_PROXY_BIN:-}" ]] || { echo "Missing/invalid JITO_SHREDSTREAM_PROXY_BIN: ${JITO_SHREDSTREAM_PROXY_BIN:-}" >&2; exit 1; }
+[[ -f "${JITO_SHREDS_AUTH_KEYPAIR:-}"   ]] || { echo "Missing JITO_SHREDS_AUTH_KEYPAIR: ${JITO_SHREDS_AUTH_KEYPAIR:-}" >&2; exit 1; }
+
+mkdir -p "$(dirname "$JITO_LOG_FILE")"
+export RUST_LOG="${RUST_LOG:-info}"
+
+echo "Starting jito-shredstream-proxy..."
+echo "  block-engine:  $JITO_BLOCK_ENGINE_URL"
+echo "  regions:       $JITO_SHREDSTREAM_REGIONS"
+echo "  dest-ip-ports: $JITO_DEST_IP_PORTS"
+echo "  grpc-port:     ${JITO_SHREDSTREAM_GRPC_PORT:-disabled}"
+echo "  log file:      $JITO_LOG_FILE"
+
+args=(
+  shredstream
+  --block-engine-url "$JITO_BLOCK_ENGINE_URL"
+  --auth-keypair "$JITO_SHREDS_AUTH_KEYPAIR"
+  --desired-regions "$JITO_SHREDSTREAM_REGIONS"
+  --dest-ip-ports "$JITO_DEST_IP_PORTS"
+)
+
+if [[ -n "${JITO_SHREDSTREAM_GRPC_PORT:-}" ]]; then
+  args+=( --grpc-service-port "$JITO_SHREDSTREAM_GRPC_PORT" )
+fi
+
+exec "$JITO_SHREDSTREAM_PROXY_BIN" "${args[@]}" >>"$JITO_LOG_FILE" 2>&1
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/yogurtslinger-firewall.sh /usr/local/sbin/yogurtslinger-firewall.sh.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/yogurtslinger-firewall.sh
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/yogurtslinger-firewall.sh
+sudo chown root:root /usr/local/sbin/yogurtslinger-firewall.sh
+sudo chmod 0755 /usr/local/sbin/yogurtslinger-firewall.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Yogurtslinger firewall hardening (authoritative):
+# - TCP/11000 (ShredStream gRPC) localhost-only
+# - UDP/20000 (ShredStream unicast ingress) allowlist Jito region IPs (SLC + NY)
+
+CHAIN="YOGURTSLINGER"
+IPT="iptables -w 5"
+
+# Remove legacy rules from old implementations (keep state clean)
+while $IPT -C INPUT ! -s 127.0.0.1/32 -p tcp -m tcp --dport 11000 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do
+  $IPT -D INPUT ! -s 127.0.0.1/32 -p tcp -m tcp --dport 11000 -j REJECT --reject-with icmp-port-unreachable
+done
+while $IPT -C INPUT -p tcp -m tcp --dport 11000 ! -i lo -j REJECT 2>/dev/null; do
+  $IPT -D INPUT -p tcp -m tcp --dport 11000 ! -i lo -j REJECT
+done
+
+# Create chain if missing; then flush
+$IPT -N "$CHAIN" 2>/dev/null || true
+$IPT -F "$CHAIN"
+
+# Ensure exactly one jump from INPUT -> CHAIN at the top
+while $IPT -C INPUT -j "$CHAIN" 2>/dev/null; do
+  $IPT -D INPUT -j "$CHAIN"
+done
+$IPT -I INPUT 1 -j "$CHAIN"
+
+# TCP/11000: localhost-only
+$IPT -A "$CHAIN" -p tcp -m tcp --dport 11000 -s 127.0.0.1/32 -j ACCEPT
+$IPT -A "$CHAIN" -p tcp -m tcp --dport 11000 -j REJECT --reject-with icmp-port-unreachable
+
+# UDP/20000: allowlist only
+$IPT -A "$CHAIN" -p udp -m udp --dport 20000 -s 127.0.0.1/32 -j ACCEPT
+
+# Salt Lake City (slc)
+for ip in \
+  64.130.53.8 \
+  64.130.53.57 \
+  64.130.53.81 \
+  64.130.53.90 \
+  64.130.53.82 \
+  64.130.33.181 \
+  64.130.33.88
+do
+  $IPT -A "$CHAIN" -p udp -m udp --dport 20000 -s "${ip}/32" -j ACCEPT
+done
+
+# New York (ny)
+for ip in \
+  141.98.216.96 \
+  64.130.51.60 \
+  64.130.34.186 \
+  64.130.34.143 \
+  64.130.34.142 \
+  64.130.34.189 \
+  64.130.34.190 \
+  64.130.34.141
+do
+  $IPT -A "$CHAIN" -p udp -m udp --dport 20000 -s "${ip}/32" -j ACCEPT
+done
+
+$IPT -A "$CHAIN" -p udp -m udp --dport 20000 -j REJECT --reject-with icmp-port-unreachable
+$IPT -A "$CHAIN" -j RETURN
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/yogurtslinger-snapshot-gc.sh /usr/local/sbin/yogurtslinger-snapshot-gc.sh.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/yogurtslinger-snapshot-gc.sh
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/yogurtslinger-snapshot-gc.sh
+sudo chown root:root /usr/local/sbin/yogurtslinger-snapshot-gc.sh
+sudo chmod 0755 /usr/local/sbin/yogurtslinger-snapshot-gc.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Yogurtslinger snapshot GC + archive normalization
+#
+# Rules:
+# - NEVER delete anything that could be an in-progress download.
+# - Normalize layout so completed archives staged under SNAPSHOT_ARCHIVE_DIR/remote
+#   are hardlinked into SNAPSHOT_ARCHIVE_DIR (the validator's configured archive path).
+# - Only delete tmp artifacts older than 36 hours.
+
+ENV_FILE="/etc/yogurtslinger/yogurtslinger.env"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+SNAP_DIR="${SNAPSHOT_ARCHIVE_DIR:-/mnt/ledger/ledger/remote}"
+LEDGER_BASE="${LEDGER_DIR:-/mnt/ledger/ledger}"
+REMOTE_STAGING="${SNAP_DIR}/remote"
+
+echo "[snapshot-gc] $(date -u +%Y-%m-%dT%H:%M:%SZ) begin"
+echo "[snapshot-gc] SNAP_DIR=$SNAP_DIR"
+echo "[snapshot-gc] LEDGER_BASE=$LEDGER_BASE"
+echo "[snapshot-gc] REMOTE_STAGING=$REMOTE_STAGING"
+
+# 1) If staging exists, hardlink any completed archives into SNAP_DIR (idempotent).
+if [[ -d "$REMOTE_STAGING" ]]; then
+  shopt -s nullglob
+  for f in "$REMOTE_STAGING"/snapshot-*.tar.zst "$REMOTE_STAGING"/incremental-snapshot-*.tar.zst; do
+    base="$(basename "$f")"
+    if [[ ! -e "$SNAP_DIR/$base" ]]; then
+      ln "$f" "$SNAP_DIR/$base"
+      echo "[snapshot-gc] linked from staging: $base"
+    fi
+  done
+fi
+
+# 2) Delete only tmp snapshot tarballs older than 36 hours
+find "$SNAP_DIR" -maxdepth 2 -type f -name 'tmp-snapshot-*.tar.zst' -mmin +2160 -print -delete 2>/dev/null || true
+find "$LEDGER_BASE" -maxdepth 3 -type f -name 'tmp-snapshot-*.tar.zst' -mmin +2160 -print -delete 2>/dev/null || true
+
+# 3) Delete only tmp-snapshot-archive-* dirs older than 36 hours
+if [[ -d "$LEDGER_BASE/snapshots" ]]; then
+  find "$LEDGER_BASE/snapshots" -maxdepth 1 -type d -name 'tmp-snapshot-archive-*' -mmin +2160 -print -exec rm -rf {} \; 2>/dev/null || true
+fi
+
+echo "[snapshot-gc] done"
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ 
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /etc/systemd/system/yogurtslinger-firewall.service /etc/systemd/system/yogurtslinger-firewall.service.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /etc/systemd/system/yogurtslinger-firewall.service
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/systemd/system/yogurtslinger-firewall.service
+sudo chown root:root /etc/systemd/system/yogurtslinger-firewall.service
+sudo chmod 0644 /etc/systemd/system/yogurtslinger-firewall.service
+[Unit]
+Description=Yogurtslinger firewall hardening rules
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/yogurtslinger-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /etc/systemd/system/jito-shredstream.service /etc/systemd/system/jito-shredstream.service.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /etc/systemd/system/jito-shredstream.service
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/systemd/system/jito-shredstream.service
+sudo chown root:root /etc/systemd/system/jito-shredstream.service
+sudo chmod 0644 /etc/systemd/system/jito-shredstream.service
+[Unit]
+Description=Yogurtslinger Jito ShredStream Proxy (Mainnet)
+After=network.target yogurtslinger-firewall.service
+Wants=network.target yogurtslinger-firewall.service
+Requires=yogurtslinger-firewall.service
+RequiresMountsFor=/mnt/ledger
+
+[Service]
+Type=simple
+User=dudesoup
+Group=dudesoup
+EnvironmentFile=/etc/yogurtslinger/yogurtslinger.env
+
+PermissionsStartOnly=true
+ExecStartPre=/usr/bin/install -d -o dudesoup -g dudesoup -m 0755 /mnt/ledger/logs
+ExecStart=/home/dudesoup/jito/shredstream-proxy.sh
+
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGINT
+KillMode=mixed
+
+CPUAffinity=2-5
+
+LimitNOFILE=1000000
+LimitMEMLOCK=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /etc/systemd/system/agave-rpc-mainnet.service /etc/systemd/system/agave-rpc-mainnet.service.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /etc/systemd/system/agave-rpc-mainnet.service
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/systemd/system/agave-rpc-mainnet.service
+sudo chown root:root /etc/systemd/system/agave-rpc-mainnet.service
+sudo chmod 0644 /etc/systemd/system/agave-rpc-mainnet.service
+[Unit]
+Description=Yogurtslinger Agave RPC Node (Mainnet Follower)
+After=network.target mnt-ledger.mount mnt-accounts.mount yogurtslinger-firewall.service
+Wants=network.target yogurtslinger-firewall.service jito-shredstream.service
+
+# Hard dependency only on firewall (do not hard-bind validator to shredstream)
+Requires=yogurtslinger-firewall.service
+RequiresMountsFor=/mnt/ledger /mnt/accounts
+
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=dudesoup
+Group=dudesoup
+EnvironmentFile=/etc/yogurtslinger/yogurtslinger.env
+
+PermissionsStartOnly=true
+ExecStartPre=/usr/bin/install -d -o dudesoup -g dudesoup -m 0755 /mnt/ledger/logs
+ExecStartPre=/usr/local/sbin/yogurtslinger-snapshot-gc.sh
+
+ExecStart=/home/dudesoup/agave-bin/start-validator.sh
+
+Restart=on-failure
+RestartSec=3
+
+TimeoutStartSec=0
+TimeoutStopSec=90
+KillSignal=SIGINT
+KillMode=mixed
+
+CPUAffinity=12-23 26-47
+
+LimitNOFILE=1000000
+LimitMEMLOCK=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/mev-up /usr/local/sbin/mev-up.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/mev-up
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/mev-up
+sudo chown root:root /usr/local/sbin/mev-up
+sudo chmod 0755 /usr/local/sbin/mev-up
+#!/usr/bin/env bash
+set -euo pipefail
+systemctl daemon-reload
+systemctl start yogurtslinger-firewall.service
+systemctl start jito-shredstream.service
+systemctl start agave-rpc-mainnet.service
+systemctl status yogurtslinger-firewall.service jito-shredstream.service agave-rpc-mainnet.service --no-pager -l
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/mev-down /usr/local/sbin/mev-down.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/mev-down
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/mev-down
+sudo chown root:root /usr/local/sbin/mev-down
+sudo chmod 0755 /usr/local/sbin/mev-down
+#!/usr/bin/env bash
+set -euo pipefail
+systemctl stop agave-rpc-mainnet.service
+systemctl stop jito-shredstream.service || true
+systemctl status yogurtslinger-firewall.service jito-shredstream.service agave-rpc-mainnet.service --no-pager -l || true
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/mev-ports /usr/local/sbin/mev-ports.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/mev-ports
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/mev-ports
+sudo chown root:root /usr/local/sbin/mev-ports
+sudo chmod 0755 /usr/local/sbin/mev-ports
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== ss tcp ==="
+ss -lntup | grep -E ":8899|:10000|:11000|:22" || true
+echo
+echo "=== ss udp ==="
+ss -u -a | grep -E ":20000|:8001|:8002" || true
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/mev-status /usr/local/sbin/mev-status.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/mev-status
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/mev-status
+sudo chown root:root /usr/local/sbin/mev-status
+sudo chmod 0755 /usr/local/sbin/mev-status
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== systemd ==="
+systemctl status yogurtslinger-firewall.service jito-shredstream.service agave-rpc-mainnet.service --no-pager -l || true
+echo
+echo "=== ports ==="
+/usr/local/sbin/mev-ports
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /usr/local/sbin/mev-logs /usr/local/sbin/mev-logs.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /usr/local/sbin/mev-logs
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /usr/local/sbin/mev-logs
+sudo chown root:root /usr/local/sbin/mev-logs
+sudo chmod 0755 /usr/local/sbin/mev-logs
+#!/usr/bin/env bash
+set -euo pipefail
+echo "Tailing logs (ctrl-c to stop)..."
+tail -F /mnt/ledger/logs/agave-validator.log /mnt/ledger/logs/jito-shredstream.log
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /etc/logrotate.d/yogurtslinger /etc/logrotate.d/yogurtslinger.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /etc/logrotate.d/yogurtslinger
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/logrotate.d/yogurtslinger
+sudo chown root:root /etc/logrotate.d/yogurtslinger
+sudo chmod 0644 /etc/logrotate.d/yogurtslinger
+/mnt/ledger/logs/*.log {
+  daily
+  rotate 14
+  missingok
+  notifempty
+  compress
+  delaycompress
+  copytruncate
+  size 1G
+}
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ 
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo /usr/local/sbin/mev-down
+
+# Apply edits above (env + start-validator.sh at minimum)
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cp -a /home/dudesoup/agave-bin/start-validator.sh /home/dudesoup/agave-bin/start-validator.sh.bak.$(date -u +%Y%m%dT%H%M%SZ)
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo nano /home/dudesoup/agave-bin/start-validator.sh
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /home/dudesoup/agave-bin/start-validator.sh
+sudo chown dudesoup:dudesoup /home/dudesoup/agave-bin/start-validator.sh
+sudo chmod 0755 /home/dudesoup/agave-bin/start-validator.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="/etc/yogurtslinger/yogurtslinger.env"
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "Missing env file: $ENV_FILE" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+[[ -x "${AGAVE_VALIDATOR_BIN:-}" ]] || { echo "Missing/invalid AGAVE_VALIDATOR_BIN: ${AGAVE_VALIDATOR_BIN:-}" >&2; exit 1; }
+[[ -f "${IDENTITY_KEYPAIR:-}"   ]] || { echo "Missing IDENTITY_KEYPAIR: ${IDENTITY_KEYPAIR:-}" >&2; exit 1; }
+[[ -d "${LEDGER_DIR:-}"         ]] || { echo "Missing LEDGER_DIR: ${LEDGER_DIR:-}" >&2; exit 1; }
+[[ -d "${ACCOUNTS_DIR:-}"       ]] || { echo "Missing ACCOUNTS_DIR: ${ACCOUNTS_DIR:-}" >&2; exit 1; }
+[[ -d "${SNAPSHOT_ARCHIVE_DIR:-}" ]] || { echo "Missing SNAPSHOT_ARCHIVE_DIR: ${SNAPSHOT_ARCHIVE_DIR:-}" >&2; exit 1; }
+
+if [[ "${AGAVE_ENABLE_GEYSER:-0}" == "1" ]]; then
+  [[ -f "${GEYSER_CONFIG:-}" ]] || { echo "AGAVE_ENABLE_GEYSER=1 but GEYSER_CONFIG missing: ${GEYSER_CONFIG:-}" >&2; exit 1; }
+fi
+
+# Diagnostics (optional)
+if [[ -n "${RUST_BACKTRACE:-}" ]]; then export RUST_BACKTRACE; fi
+if [[ -n "${RUST_LOG:-}" ]]; then export RUST_LOG; fi
+
+mkdir -p "$(dirname "$LEDGER_LOG_FILE")"
+
+echo "Starting agave-validator..."
+echo "  bin:             $AGAVE_VALIDATOR_BIN"
+echo "  identity:        $IDENTITY_KEYPAIR"
+echo "  ledger:          $LEDGER_DIR"
+echo "  accounts:        $ACCOUNTS_DIR"
+echo "  archives dir:    $SNAPSHOT_ARCHIVE_DIR"
+echo "  rpc:             127.0.0.1:8899"
+echo "  gossip:          8001"
+echo "  dynports:        8002-8027"
+echo "  geyser enabled:  ${AGAVE_ENABLE_GEYSER:-0}"
+echo "  RUST_BACKTRACE:  ${RUST_BACKTRACE:-<unset>}"
+echo "  log file:        $LEDGER_LOG_FILE"
+
+args=(
+  --identity "$IDENTITY_KEYPAIR"
+  --ledger "$LEDGER_DIR"
+  --accounts "$ACCOUNTS_DIR"
+  --log "$LEDGER_LOG_FILE"
+
+  --expected-genesis-hash "$EXPECTED_GENESIS_HASH"
+
+  --snapshots "$LEDGER_DIR"
+  --full-snapshot-archive-path "$SNAPSHOT_ARCHIVE_DIR"
+  --incremental-snapshot-archive-path "$SNAPSHOT_ARCHIVE_DIR"
+  --use-snapshot-archives-at-startup when-newest
+
+  --private-rpc
+  --full-rpc-api
+  --rpc-bind-address 127.0.0.1
+  --rpc-port 8899
+
+  --gossip-port 8001
+  --dynamic-port-range 8002-8027
+
+  --wal-recovery-mode skip_any_corrupted_record
+  --no-voting
+  --no-poh-speed-test
+  --no-port-check
+
+  --limit-ledger-size 50000000
+  --accounts-index-scan-results-limit-mb 8192
+)
+
+# Snapshot download controls
+if [[ "${AGAVE_NO_SNAPSHOT_FETCH:-0}" == "1" ]]; then
+  args+=( --no-snapshot-fetch )
+fi
+if [[ "${AGAVE_ONLY_KNOWN_RPC:-0}" == "1" ]]; then
+  args+=( --only-known-rpc )
+fi
+if [[ -n "${AGAVE_MAX_LOCAL_SNAPSHOT_AGE:-}" ]]; then
+  args+=( --maximum-local-snapshot-age "$AGAVE_MAX_LOCAL_SNAPSHOT_AGE" )
+fi
+if [[ -n "${AGAVE_MIN_SNAPSHOT_DOWNLOAD_SPEED:-}" ]]; then
+  args+=( --minimal-snapshot-download-speed "$AGAVE_MIN_SNAPSHOT_DOWNLOAD_SPEED" )
+fi
+if [[ -n "${AGAVE_MAX_SNAPSHOT_DOWNLOAD_ABORT:-}" ]]; then
+  args+=( --maximum-snapshot-download-abort "$AGAVE_MAX_SNAPSHOT_DOWNLOAD_ABORT" )
+fi
+if [[ "${AGAVE_NO_GENESIS_FETCH:-0}" == "1" ]]; then
+  args+=( --no-genesis-fetch )
+fi
+
+# Accounts index in RAM (correct flag name for Solana/Agave-style validators)
+if [[ -n "${AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB:-}" ]]; then
+  if "$AGAVE_VALIDATOR_BIN" --help 2>/dev/null | grep -q -- "--accounts-index-memory-limit-mb"; then
+    args+=( --accounts-index-memory-limit-mb "$AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB" )
+    echo "  accounts index memory limit: ${AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB} MB"
+  else
+    echo "WARN: AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB set but --accounts-index-memory-limit-mb not supported by this agave-validator build"
+  fi
+fi
+
+# Entry points
+for ep in ${ENTRYPOINTS}; do
+  args+=( --entrypoint "$ep" )
+done
+
+# Known validators
+for kv in ${KNOWN_VALIDATORS}; do
+  args+=( --known-validator "$kv" )
+done
+
+# Geyser
+if [[ "${AGAVE_ENABLE_GEYSER:-0}" == "1" ]]; then
+  args+=( --geyser-plugin-config "$GEYSER_CONFIG" )
+fi
+
+exec "$AGAVE_VALIDATOR_BIN" "${args[@]}"
+
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo /home/dudesoup/agave-bin/v3.0.12/bin/agave-validator --help | grep -F -- "--accounts-index-memory-limit-mb" || true
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/sysctl.d/9999-yogurtslinger-override.conf 2>/dev/null || true
+sudo cp -a /etc/sysctl.d/9999-yogurtslinger-override.conf /etc/sysctl.d/9999-yogurtslinger-override.conf.bak.$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || true
+sudo nano /etc/sysctl.d/9999-yogurtslinger-override.conf
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo cat /etc/sysctl.d/9999-yogurtslinger-override.conf
+sudo chown root:root /etc/sysctl.d/9999-yogurtslinger-override.conf
+sudo chmod 0644 /etc/sysctl.d/9999-yogurtslinger-override.conf
+sudo sysctl --system
+sudo sysctl net.core.rmem_max net.core.rmem_default net.core.netdev_max_backlog net.ipv4.udp_rmem_min net.ipv4.udp_wmem_min
+# Yogurtslinger final override (must apply last)
+# Goal: reduce UDP drops/rcvbuf_errors under Solana/Jito traffic.
+
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.rmem_default = 268435456
+net.core.wmem_default = 268435456
+
+net.core.netdev_max_backlog = 250000
+
+# Raise UDP minimums so sockets can grow faster under load
+net.ipv4.udp_rmem_min = 262144
+net.ipv4.udp_wmem_min = 262144
+* Applying /usr/lib/sysctl.d/10-apparmor.conf ...
+* Applying /etc/sysctl.d/10-bufferbloat.conf ...
+* Applying /etc/sysctl.d/10-console-messages.conf ...
+* Applying /etc/sysctl.d/10-ipv6-privacy.conf ...
+* Applying /etc/sysctl.d/10-kernel-hardening.conf ...
+* Applying /etc/sysctl.d/10-magic-sysrq.conf ...
+* Applying /etc/sysctl.d/10-map-count.conf ...
+* Applying /etc/sysctl.d/10-network-security.conf ...
+* Applying /etc/sysctl.d/10-ptrace.conf ...
+* Applying /etc/sysctl.d/10-zeropage.conf ...
+* Applying /etc/sysctl.d/21-agave-validator.conf ...
+* Applying /usr/lib/sysctl.d/50-coredump.conf ...
+* Applying /usr/lib/sysctl.d/50-pid-max.conf ...
+* Applying /etc/sysctl.d/90-solana-net.conf ...
+* Applying /etc/sysctl.d/90-yogurtslinger-net.conf ...
+* Applying /etc/sysctl.d/99-busy-poll.conf ...
+* Applying /etc/sysctl.d/99-hugepages.conf ...
+* Applying /usr/lib/sysctl.d/99-protect-links.conf ...
+* Applying /etc/sysctl.d/99-rps-xps.conf ...
+* Applying /etc/sysctl.d/99-slinger-ultra.conf ...
+* Applying /etc/sysctl.d/99-solana-lowlatency.conf ...
+* Applying /etc/sysctl.d/99-solana-performance.conf ...
+* Applying /etc/sysctl.d/99-solana.conf ...
+* Applying /etc/sysctl.d/99-sysctl.conf ...
+* Applying /etc/sysctl.d/999-solana-override.conf ...
+* Applying /etc/sysctl.d/9999-yogurtslinger-override.conf ...
+* Applying /etc/sysctl.conf ...
+kernel.apparmor_restrict_unprivileged_userns = 1
+net.core.default_qdisc = fq_codel
+kernel.printk = 4 4 1 7
+net.ipv6.conf.all.use_tempaddr = 2
+net.ipv6.conf.default.use_tempaddr = 2
+kernel.kptr_restrict = 1
+kernel.sysrq = 176
+vm.max_map_count = 1048576
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.rp_filter = 2
+kernel.yama.ptrace_scope = 1
+vm.mmap_min_addr = 65536
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+vm.max_map_count = 2000000
+fs.nr_open = 2000000
+kernel.core_pattern = |/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d
+kernel.core_pipe_limit = 16
+fs.suid_dumpable = 2
+kernel.pid_max = 4194304
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.netdev_max_backlog = 250000
+net.core.optmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 65536 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.rmem_default = 268435456
+net.core.wmem_default = 268435456
+net.core.netdev_max_backlog = 250000
+net.ipv4.udp_rmem_min = 262144
+net.ipv4.udp_wmem_min = 262144
+net.core.busy_poll = 50
+net.core.busy_read = 50
+net.ipv4.tcp_fastopen = 3
+vm.nr_hugepages = 8
+fs.protected_fifos = 1
+fs.protected_hardlinks = 1
+fs.protected_regular = 2
+fs.protected_symlinks = 1
+net.core.rps_sock_flow_entries = 32768
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.rmem_default = 134217728
+net.core.wmem_default = 134217728
+net.core.netdev_max_backlog = 500000
+net.core.busy_poll = 50
+net.core.busy_read = 50
+net.core.rps_sock_flow_entries = 32768
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_sack = 0
+fs.file-max = 5000000
+fs.nr_open = 1000000
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.rmem_default = 134217728
+net.core.wmem_default = 134217728
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.core.netdev_max_backlog = 500000
+net.core.rps_sock_flow_entries = 32768
+net.core.busy_poll = 50
+net.core.busy_read = 50
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_sack = 0
+fs.file-max = 5000000
+vm.max_map_count = 2000000
+net.core.busy_poll = 50
+net.core.busy_read = 50
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.netdev_max_backlog = 500000
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+net.ipv4.udp_mem = 1000000 1000000 1000000
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_sack = 0
+net.core.default_qdisc = fq
+net.core.rmem_max = 134217728
+net.core.rmem_default = 134217728
+net.core.wmem_max = 134217728
+net.core.wmem_default = 134217728
+net.ipv4.tcp_rmem = 4096 87380 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+net.core.netdev_max_backlog = 10000
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+fs.file-max = 5000000
+fs.nr_open = 1000000
+vm.max_map_count = 1000000
+fs.file-max = 1000000
+vm.max_map_count = 2000000
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.netdev_max_backlog = 100000
+net.ipv4.tcp_rmem = 4096 87380 4194304
+net.ipv4.tcp_wmem = 4096 65536 4194304
+net.ipv4.tcp_low_latency = 1
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+vm.nr_hugepages = 4096
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 134217728
+net.core.wmem_default = 134217728
+net.ipv4.tcp_rmem = 4096 87380 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+net.core.netdev_max_backlog = 100000
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.rmem_default = 268435456
+net.core.wmem_default = 268435456
+net.core.netdev_max_backlog = 250000
+net.ipv4.udp_rmem_min = 262144
+net.ipv4.udp_wmem_min = 262144
+fs.file-max = 1000000
+vm.max_map_count = 2000000
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.netdev_max_backlog = 100000
+net.ipv4.tcp_rmem = 4096 87380 4194304
+net.ipv4.tcp_wmem = 4096 65536 4194304
+net.ipv4.tcp_low_latency = 1
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+vm.nr_hugepages = 4096
+net.core.rmem_max = 134217728
+net.core.rmem_default = 268435456
+net.core.netdev_max_backlog = 100000
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo systemctl daemon-reload
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo /usr/local/sbin/mev-down
+sudo systemctl daemon-reload
+sudo /usr/local/sbin/mev-up
+sudo /usr/local/sbin/mev-status
+● yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules
+     Loaded: loaded (/etc/systemd/system/yogurtslinger-firewall.service; enabled; preset: enabled)
+     Active: active (exited) since Sat 2025-12-13 01:46:12 UTC; 7h ago
+   Main PID: 380802 (code=exited, status=0/SUCCESS)
+        CPU: 313ms
+
+Dec 13 01:46:11 yogurtslinger systemd[1]: Starting yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules...
+Dec 13 01:46:12 yogurtslinger systemd[1]: Finished yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules.
+
+○ jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet)
+     Loaded: loaded (/etc/systemd/system/jito-shredstream.service; enabled; preset: enabled)
+     Active: inactive (dead) since Sat 2025-12-13 09:09:51 UTC; 102ms ago
+   Duration: 15min 14.542s
+    Process: 667277 ExecStart=/home/dudesoup/jito/shredstream-proxy.sh (code=exited, status=0/SUCCESS)
+   Main PID: 667277 (code=exited, status=0/SUCCESS)
+        CPU: 6min 4.133s
+
+Dec 13 08:54:36 yogurtslinger shredstream-proxy.sh[667277]: Starting jito-shredstream-proxy...
+Dec 13 08:54:36 yogurtslinger shredstream-proxy.sh[667277]:   block-engine:  https://mainnet.block-engine.jito.wtf
+Dec 13 08:54:36 yogurtslinger shredstream-proxy.sh[667277]:   regions:       slc,ny
+Dec 13 08:54:36 yogurtslinger shredstream-proxy.sh[667277]:   dest-ip-ports: 127.0.0.1:8002
+Dec 13 08:54:36 yogurtslinger shredstream-proxy.sh[667277]:   grpc-port:     11000
+Dec 13 08:54:36 yogurtslinger shredstream-proxy.sh[667277]:   log file:      /mnt/ledger/logs/jito-shredstream.log
+Dec 13 09:09:51 yogurtslinger systemd[1]: Stopping jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet)...
+Dec 13 09:09:51 yogurtslinger systemd[1]: jito-shredstream.service: Deactivated successfully.
+Dec 13 09:09:51 yogurtslinger systemd[1]: Stopped jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet).
+Dec 13 09:09:51 yogurtslinger systemd[1]: jito-shredstream.service: Consumed 6min 4.133s CPU time, 922.2M memory peak, 0B memory swap peak.
+
+○ agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower)
+     Loaded: loaded (/etc/systemd/system/agave-rpc-mainnet.service; enabled; preset: enabled)
+     Active: inactive (dead) since Sat 2025-12-13 09:09:51 UTC; 710ms ago
+   Duration: 15min 13.899s
+    Process: 667323 ExecStart=/home/dudesoup/agave-bin/start-validator.sh (code=killed, signal=INT)
+   Main PID: 667323 (code=killed, signal=INT)
+        CPU: 3min 17.932s
+
+Dec 13 08:54:37 yogurtslinger start-validator.sh[667323]:   dynports:        8002-8027
+Dec 13 08:54:37 yogurtslinger start-validator.sh[667323]:   geyser enabled:  1
+Dec 13 08:54:37 yogurtslinger start-validator.sh[667323]:   RUST_BACKTRACE:  1
+Dec 13 08:54:37 yogurtslinger start-validator.sh[667323]:   log file:        /mnt/ledger/logs/agave-validator.log
+Dec 13 08:54:37 yogurtslinger start-validator.sh[667323]: WARN: AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB set but --accounts-index-memory-limit-mb not supported by this agave-validator build
+Dec 13 08:54:38 yogurtslinger start-validator.sh[667323]: log file: /mnt/ledger/logs/agave-validator.log
+Dec 13 09:09:51 yogurtslinger systemd[1]: Stopping agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower)...
+Dec 13 09:09:51 yogurtslinger systemd[1]: agave-rpc-mainnet.service: Deactivated successfully.
+Dec 13 09:09:51 yogurtslinger systemd[1]: Stopped agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower).
+Dec 13 09:09:51 yogurtslinger systemd[1]: agave-rpc-mainnet.service: Consumed 3min 17.932s CPU time, 47.9G memory peak, 0B memory swap peak.
+● yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules
+     Loaded: loaded (/etc/systemd/system/yogurtslinger-firewall.service; enabled; preset: enabled)
+     Active: active (exited) since Sat 2025-12-13 01:46:12 UTC; 7h ago
+   Main PID: 380802 (code=exited, status=0/SUCCESS)
+        CPU: 313ms
+
+Dec 13 01:46:11 yogurtslinger systemd[1]: Starting yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules...
+Dec 13 01:46:12 yogurtslinger systemd[1]: Finished yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules.
+
+● jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet)
+     Loaded: loaded (/etc/systemd/system/jito-shredstream.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2025-12-13 09:09:54 UTC; 577ms ago
+    Process: 668583 ExecStartPre=/usr/bin/install -d -o dudesoup -g dudesoup -m 0755 /mnt/ledger/logs (code=exited, status=0/SUCCESS)
+   Main PID: 668585 (jito-shredstrea)
+      Tasks: 24
+     Memory: 25.1M (peak: 25.1M)
+        CPU: 187ms
+     CGroup: /system.slice/jito-shredstream.service
+             └─668585 /usr/local/bin/jito-shredstream-proxy shredstream --block-engine-url https://mainnet.block-engine.jito.wtf --auth-keypair /home/dudesoup/jito/keys/jito-shreds-auth.json --desired-regions slc,ny --dest-ip-ports 127.0.0.1:8002 --grpc-service-port 11000
+
+Dec 13 09:09:54 yogurtslinger systemd[1]: Starting jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet)...
+Dec 13 09:09:54 yogurtslinger systemd[1]: Started jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet).
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]: Starting jito-shredstream-proxy...
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   block-engine:  https://mainnet.block-engine.jito.wtf
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   regions:       slc,ny
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   dest-ip-ports: 127.0.0.1:8002
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   grpc-port:     11000
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   log file:      /mnt/ledger/logs/jito-shredstream.log
+
+● agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower)
+     Loaded: loaded (/etc/systemd/system/agave-rpc-mainnet.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2025-12-13 09:09:55 UTC; 83ms ago
+    Process: 668588 ExecStartPre=/usr/bin/install -d -o dudesoup -g dudesoup -m 0755 /mnt/ledger/logs (code=exited, status=0/SUCCESS)
+    Process: 668602 ExecStartPre=/usr/local/sbin/yogurtslinger-snapshot-gc.sh (code=exited, status=0/SUCCESS)
+   Main PID: 668628 (9)
+      Tasks: 1
+     Memory: 1.4M (peak: 4.1M)
+        CPU: 80ms
+     CGroup: /system.slice/agave-rpc-mainnet.service
+             └─668628 /usr/lib/systemd/systemd-executor --deserialize 75 --log-level info --log-target journal-or-kmsg
+
+Dec 13 09:09:54 yogurtslinger systemd[1]: Starting agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower)...
+Dec 13 09:09:55 yogurtslinger yogurtslinger-snapshot-gc.sh[668602]: [snapshot-gc] 2025-12-13T09:09:55Z begin
+Dec 13 09:09:55 yogurtslinger yogurtslinger-snapshot-gc.sh[668602]: [snapshot-gc] SNAP_DIR=/mnt/ledger/ledger/remote
+Dec 13 09:09:55 yogurtslinger yogurtslinger-snapshot-gc.sh[668602]: [snapshot-gc] LEDGER_BASE=/mnt/ledger/ledger
+Dec 13 09:09:55 yogurtslinger yogurtslinger-snapshot-gc.sh[668602]: [snapshot-gc] REMOTE_STAGING=/mnt/ledger/ledger/remote/remote
+Dec 13 09:09:55 yogurtslinger yogurtslinger-snapshot-gc.sh[668602]: [snapshot-gc] done
+Dec 13 09:09:55 yogurtslinger systemd[1]: Started agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower).
+=== systemd ===
+● yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules
+     Loaded: loaded (/etc/systemd/system/yogurtslinger-firewall.service; enabled; preset: enabled)
+     Active: active (exited) since Sat 2025-12-13 01:46:12 UTC; 7h ago
+   Main PID: 380802 (code=exited, status=0/SUCCESS)
+        CPU: 313ms
+
+Dec 13 01:46:11 yogurtslinger systemd[1]: Starting yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules...
+Dec 13 01:46:12 yogurtslinger systemd[1]: Finished yogurtslinger-firewall.service - Yogurtslinger firewall hardening rules.
+
+● jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet)
+     Loaded: loaded (/etc/systemd/system/jito-shredstream.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2025-12-13 09:09:54 UTC; 794ms ago
+    Process: 668583 ExecStartPre=/usr/bin/install -d -o dudesoup -g dudesoup -m 0755 /mnt/ledger/logs (code=exited, status=0/SUCCESS)
+   Main PID: 668585 (jito-shredstrea)
+      Tasks: 24
+     Memory: 46.0M (peak: 46.2M)
+        CPU: 337ms
+     CGroup: /system.slice/jito-shredstream.service
+             └─668585 /usr/local/bin/jito-shredstream-proxy shredstream --block-engine-url https://mainnet.block-engine.jito.wtf --auth-keypair /home/dudesoup/jito/keys/jito-shreds-auth.json --desired-regions slc,ny --dest-ip-ports 127.0.0.1:8002 --grpc-service-port 11000
+
+Dec 13 09:09:54 yogurtslinger systemd[1]: Starting jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet)...
+Dec 13 09:09:54 yogurtslinger systemd[1]: Started jito-shredstream.service - Yogurtslinger Jito ShredStream Proxy (Mainnet).
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]: Starting jito-shredstream-proxy...
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   block-engine:  https://mainnet.block-engine.jito.wtf
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   regions:       slc,ny
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   dest-ip-ports: 127.0.0.1:8002
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   grpc-port:     11000
+Dec 13 09:09:54 yogurtslinger shredstream-proxy.sh[668585]:   log file:      /mnt/ledger/logs/jito-shredstream.log
+
+● agave-rpc-mainnet.service - Yogurtslinger Agave RPC Node (Mainnet Follower)
+     Loaded: loaded (/etc/systemd/system/agave-rpc-mainnet.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2025-12-13 09:09:55 UTC; 285ms ago
+    Process: 668588 ExecStartPre=/usr/bin/install -d -o dudesoup -g dudesoup -m 0755 /mnt/ledger/logs (code=exited, status=0/SUCCESS)
+    Process: 668602 ExecStartPre=/usr/local/sbin/yogurtslinger-snapshot-gc.sh (code=exited, status=0/SUCCESS)
+   Main PID: 668628 (agave-validator)
+      Tasks: 1
+     Memory: 3.6M (peak: 4.6M)
+        CPU: 98ms
+     CGroup: /system.slice/agave-rpc-mainnet.service
+             └─668628 /home/dudesoup/agave-bin/v3.0.12/bin/agave-validator --identity /home/dudesoup/jito/keys/identity.json --ledger /mnt/ledger/ledger --accounts /mnt/accounts/accounts --log /mnt/ledger/logs/agave-validator.log --expected-genesis-hash 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d --snapshots /mnt/ledger/ledger --full-snapshot-archive-path /mnt/ledger/ledger/remote --incremental-snapshot-archive-path /mnt/ledger/ledger/remote --use-snapshot-archives-at-startup when-newest --private-rpc --full-rpc-api --rpc-bind-address 127.0.0.1 --rpc-port 8899 --gossip-port 8001 --dynamic-port-range 8002-8027 --wal-recovery-mode skip_any_corrupted_record --no-voting --no-poh-speed-test --no-port-check --limit-ledger-size 50000000 --accounts-index-scan-results-limit-mb 8192 --only-known-rpc --maximum-local-snapshot-age 40000 --minimal-snapshot-download-speed 5242880 --maximum-snapshot-download-abort 10 --no-genesis-fetch --entrypoint entrypoint.mainnet-beta.solana.com:8001 --entrypoint entrypoint2.mainnet-beta.solana.com:8001 --entrypoint entrypoint3.mainnet-beta.solana.com:8001 --known-validator 5D1fNXzvv5NjV1ysLjirC4WY92RNsVH18vjmcszZd8on --known-validator 7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2 --known-validator GdnSyH3YtwcxFvQrVVJMm1JhTS4QVX7MFsX56uJLUfiZ --known-validator DE1bawNcRJB9rVm3buyMVfr8mBEoyyu73NBovf2oXJsJ --geyser-plugin-config /home/dudesoup/geyser-config.json
+
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   ledger:          /mnt/ledger/ledger
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   accounts:        /mnt/accounts/accounts
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   archives dir:    /mnt/ledger/ledger/remote
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   rpc:             127.0.0.1:8899
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   gossip:          8001
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   dynports:        8002-8027
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   geyser enabled:  1
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   RUST_BACKTRACE:  1
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]:   log file:        /mnt/ledger/logs/agave-validator.log
+Dec 13 09:09:55 yogurtslinger start-validator.sh[668628]: WARN: AGAVE_ACCOUNTS_INDEX_MEMORY_LIMIT_MB set but --accounts-index-memory-limit-mb not supported by this agave-validator build
+
+=== ports ===
+=== ss tcp ===
+tcp   LISTEN 0      128          0.0.0.0:11000      0.0.0.0:*    users:(("jito-shredstrea",pid=668585,fd=24))           
+tcp   LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=2086,fd=3),("systemd",pid=1,fd=102))
+tcp   LISTEN 0      4096            [::]:22            [::]:*    users:(("sshd",pid=2086,fd=4),("systemd",pid=1,fd=103))
+
+=== ss udp ===
+UNCONN 0      0            0.0.0.0:20000      0.0.0.0:*            
+UNCONN 0      0            0.0.0.0:20000      0.0.0.0:*            
+UNCONN 0      0            0.0.0.0:20000      0.0.0.0:*            
+UNCONN 0      0            0.0.0.0:20000      0.0.0.0:*            
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo timeout 2 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/11000' && echo "ShredStream gRPC OK" || echo "ShredStream gRPC FAIL"
+sudo grpcurl -plaintext -import-path /etc/yogurtslinger/protos/mev-protos -proto shredstream.proto 127.0.0.1:11000 list || true
+ShredStream gRPC OK
+shredstream.Shredstream
+shredstream.ShredstreamProxy
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ sudo timeout 2 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/10000' && echo "Yellowstone gRPC OK" || echo "Yellowstone gRPC FAIL"
+sudo grpcurl -plaintext -import-path /etc/yogurtslinger/protos/yellowstone-grpc/yellowstone-grpc-proto/proto -proto geyser.proto 127.0.0.1:10000 geyser.Geyser/GetVersion
+bash: connect: Connection refused
+bash: line 1: /dev/tcp/127.0.0.1/10000: Connection refused
+Yellowstone gRPC FAIL
+Failed to dial target host "127.0.0.1:10000": dial tcp 127.0.0.1:10000: connect: connection refused
+dudesoup@yogurtslinger:~/code/yogurtslinger_bot/red$ 

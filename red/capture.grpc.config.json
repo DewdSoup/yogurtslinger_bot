@@ -1,0 +1,16 @@
+{
+  "//": "gRPC streams dynamic accounts, RPC fetches static accounts (AmmConfig, TickArrays, BinArrays)",
+  "grpcAddress": "127.0.0.1:10000",
+  "rpcUrl": "https://mainnet.helius-rpc.com/?api-key=bff504b3-c294-46e9-b7d8-dacbcb4b9e3d",
+  "tls": false,
+  "tlsCertPath": "",
+  "tlsKeyPath": "",
+  "tlsCaPath": "",
+  "outFile": "./data/canonical_cases.ndjson",
+  "programs": {
+    "pumpswap": { "programId": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA", "pools": [] },
+    "raydium_v4": { "programId": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", "pools": [] },
+    "raydium_clmm": { "programId": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", "pools": [] },
+    "meteora_dlmm": { "programId": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", "pools": [] }
+  }
+}

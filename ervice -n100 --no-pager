@@ -1,0 +1,6 @@
+● agave-rpc-mainnet.service - Agave RPC Node (Ultra-Low Latency MEV Build)
+     Loaded: loaded (]8;;file://yogurtslinger/etc/systemd/system/agave-rpc-mainnet.service/etc/systemd/system/agave-rpc-mainnet.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: activating (auto-restart) (Result: exit-code) since Tue 2025-12-09 02:40:05 UTC; 378ms ago
+    Process: 29562 ExecStart=/home/dudesoup/agave/bin/agave-validator --no-voting --no-untrusted-rpc --no-os-network-limits-test --no-port-check --no-snapshot-fetch --no-genesis-fetch --no-poh --ledger /mnt/ledger --accounts /mnt/accounts --entrypoint entrypoint.mainnet-beta.solana.com:8001 --entrypoint entrypoint2.mainnet-beta.solana.com:8001 --entrypoint entrypoint3.mainnet-beta.solana.com:8001 --rpc-bind-address 0.0.0.0 --rpc-port 8899 --full-rpc-api --limit-ledger-size 50000000 --dynamic-port-range 8002-8027 --wal-recovery-mode skip_any_corrupted_record --private-rpc --geyser-plugin-config /home/dudesoup/geyser-config.json [0;1;31m(code=exited, status=209/STDOUT)[0m
+   Main PID: 29562 (code=exited, status=209/STDOUT)
+        CPU: 293us

@@ -1,0 +1,27 @@
+{
+    "scripts": {
+        "regression": "ts-node src/regression/runCanonicalRegression.ts",
+        "diagnostic": "ts-node src/regression/diagnosePumpSwapModels.ts",
+        "capture": "ts-node src/capture/grpcCaptureCanonical.ts ./capture.grpc.config.json",
+        "replay": "ts-node src/regression/runCanonicalReplay.ts ./data/canonical_cases.ndjson",
+        "shadow": "ts-node src/backrun/shadowMode.ts ./shadow.config.json",
+        "backrun": "ts-node src/backrun/whaleBackrun.ts ./backrun.config.json",
+        "backrun:v2": "ts-node src/backrun/whaleBackrunV2.ts ./backrun.config.json",
+        "fracture": "ts-node src/run/fractureScanner.ts",
+        "analysis": "ts-node src/scripts/dexTransactionCollector.ts",
+        "analysis:v2": "ts-node src/scripts/dexTransactionCollectorV2.ts"
+    },
+    "dependencies": {
+        "@grpc/grpc-js": "^1.14.3",
+        "@grpc/proto-loader": "^0.7.15",
+        "@solana/spl-token": "^0.4.14",
+        "@solana/web3.js": "^1.98.0",
+        "bs58": "^6.0.0",
+        "jito-ts": "^4.2.1"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.7.0"
+    }
+}

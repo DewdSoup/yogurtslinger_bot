@@ -1,0 +1,22 @@
+{
+  "schema": "alpha_mev_surface_summary_v1",
+  "generatedAt": "2025-12-12T06:32:38.206Z",
+  "config": {
+    "commitment": "confirmed",
+    "runSeconds": 3600,
+    "maxConcurrency": 6,
+    "enhancedMode": "candidate",
+    "minJitoTipLamports": "1",
+    "minStableProfitRaw": "0",
+    "outFile": "arb_recon_2025-12-12T01:33:27+00:00.jsonl"
+  },
+  "counters": {
+    "processed": 0,
+    "failed": 1,
+    "queueDepth": 233171,
+    "fingerprintsTracked": 0,
+    "programsTracked": 0
+  },
+  "topFingerprintsByMaxStableProfit": [],
+  "topProgramsByTotalStableDelta": []
+}

@@ -1,0 +1,207 @@
+{
+    "currentSprint": 1,
+    "startedOn": "2026-01-21",
+    "lastUpdated": "2026-01-21",
+    "assumptions": [
+        "Skipping Sprint 0 per request.",
+        "Primary evidence DB is data/evidence/capture.db unless overridden via CLI.",
+        "For PumpSwap validation, tx pre/post token balances provide the ground-truth reserve snapshot.",
+        "Decoder semantic correctness must be validated per-venue (infrastructure validation != semantic validation).",
+        "PumpSwap has 26 dynamic fee tiers (30-125 bps) based on market cap.",
+        "Dynamic fee detection via implied fee calculation is preferred over FeeConfig decoder.",
+        "Fees can differ by swap direction within the same pool."
+    ],
+    "tasks": [
+        {
+            "id": "S1-T0",
+            "status": "done",
+            "title": "Verify evidence schema",
+            "files": ["scripts/verify-evidence-schema.ts"]
+        },
+        {
+            "id": "S1-T1",
+            "status": "done",
+            "title": "Extract swap validation cases",
+            "files": ["scripts/validate-simulation.ts"],
+            "notes": "Extraction logic working. 20k cases extracted, 5903 evaluated after filtering."
+        },
+        {
+            "id": "S1-T2",
+            "status": "done",
+            "title": "Reconstruct per-swap snapshot from SoT cache",
+            "files": ["scripts/validate-simulation.ts"],
+            "notes": "Using tx pre/post balances from mainnet_txs as ground truth."
+        },
+        {
+            "id": "S1-T3",
+            "status": "done",
+            "title": "PumpSwap constant product sim + validate",
+            "files": [
+                "scripts/validate-simulation.ts",
+                "src/sim/math/constantProduct.ts",
+                "src/decode/programs/pumpswap.ts"
+            ],
+            "notes": "99.87% pass rate at 10bps, 100% at 20bps. Dynamic fee detection + directional fee tracking implemented.",
+            "metrics": {
+                "passRate": 0.9987,
+                "passRateAt20bps": 1.0,
+                "evaluated": 5903,
+                "tolerance": 10,
+                "maxError": 18,
+                "p99Error": 0
+            }
+        },
+        {
+            "id": "S1-T4",
+            "status": "todo",
+            "title": "Raydium V4 constant product sim + validate",
+            "files": []
+        },
+        {
+            "id": "S1-T5",
+            "status": "todo",
+            "title": "Raydium CLMM sim + validate",
+            "files": []
+        },
+        {
+            "id": "S1-T6",
+            "status": "todo",
+            "title": "Meteora DLMM sim + validate",
+            "files": []
+        },
+        {
+            "id": "S1-T7",
+            "status": "in_progress",
+            "title": "Multi-hop sequential validation",
+            "files": [
+                "src/sim/sequentialSwap.ts",
+                "scripts/validate-sandwich.ts"
+            ],
+            "notes": "Sequential swap simulation created and math verified. Cross-tx sandwich validation blocked by tx ordering."
+        },
+        {
+            "id": "S1-T8",
+            "status": "done",
+            "title": "Report generator (JSON + Markdown)",
+            "files": ["data/reports/pumpswap_final.json"]
+        },
+        {
+            "id": "S1-T9",
+            "status": "done",
+            "title": "Cross-check formulas vs reference implementations",
+            "files": ["src/sim/math/constantProduct.ts"],
+            "notes": "CPMM math audited and verified correct. Integer division matches on-chain behavior."
+        },
+        {
+            "id": "S1-T10",
+            "status": "todo",
+            "title": "Add isExactIn to SwapLeg + set in decoders",
+            "files": []
+        },
+        {
+            "id": "S1-T11",
+            "status": "todo",
+            "title": "Math for exact-out paths",
+            "files": []
+        },
+        {
+            "id": "S1-T12",
+            "status": "todo",
+            "title": "Structured decode fail reasons + evidence logging",
+            "files": []
+        },
+        {
+            "id": "S1-T13",
+            "status": "todo",
+            "title": "Gatekeeping: venue enabled only if validated",
+            "files": []
+        },
+        {
+            "id": "S1-T14",
+            "status": "done",
+            "title": "Fee structure audit per venue",
+            "files": ["src/decode/programs/pumpswap.ts"],
+            "notes": "PumpSwap: 26 dynamic fee tiers. Implemented implied fee calculation instead of FeeConfig decoder. Discovered directional fee asymmetry."
+        },
+        {
+            "id": "S1-T15",
+            "status": "todo",
+            "title": "Finish Sprint 1 demo runbook",
+            "files": []
+        }
+    ],
+    "nextActions": [
+        "Implement shred-based sandwich validation (decode pending → simulate → compare).",
+        "Solve tx ordering within slot for cross-tx sandwich validation.",
+        "Expand validation to RaydiumV4 (S1-T4).",
+        "Integrate sequential simulation with SpeculativeStateLayer."
+    ],
+    "findings": [
+        {
+            "date": "2026-01-21",
+            "issue": "WSOL normalization",
+            "status": "FIXED",
+            "details": "Some PumpSwap pools have WSOL in base position. Decoder now normalizes to always have WSOL as quote."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "Dynamic fee tiers",
+            "status": "FIXED",
+            "details": "Implemented implied fee calculation from actual swap data. Fees range 1-25 bps observed. Directional fee tracking added."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "Multi-swap filter bug",
+            "status": "FIXED",
+            "details": "Sandwich txs leaked through because filter counted signatures only within filtered results. Fixed with global signature counting."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "Directional fee asymmetry",
+            "status": "FIXED",
+            "details": "Discovered fees can differ by direction within same pool. Key fee cache by pool:direction."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "Reserve update bug",
+            "status": "FIXED",
+            "details": "sequentialSwap.ts used netInput instead of full inputAmount for reserve updates. Fixed - full input stays in pool."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "FeeOracle production integration",
+            "status": "DONE",
+            "details": "Created src/cache/feeOracle.ts for zero-latency per-pool+direction fee learning. Added feeOverrideBps to SimInput. constantProduct.ts uses it. Validated at 99.87% accuracy."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "Cross-tx sandwich validation",
+            "status": "BLOCKED",
+            "details": "62k 2-leg same-sig txs are NOT Jito bundles. Real sandwiches span multiple signatures. Need tx ordering within slot."
+        },
+        {
+            "date": "2026-01-21",
+            "issue": "Shred data available",
+            "status": "DOCUMENTED",
+            "details": "5.8M pending shreds, 137k match to swaps in multi-tx slots. Can use for MEV simulation validation."
+        }
+    ],
+    "dataStats": {
+        "singleSwaps": {
+            "total": 255954,
+            "evaluated": 5903,
+            "passRate": 0.9987
+        },
+        "twoLegSameSig": {
+            "total": 62192,
+            "losses": 54278,
+            "profits": 7887,
+            "jitoTips": 0
+        },
+        "pendingShreds": {
+            "total": 5826802,
+            "matchedToSwaps": 177574,
+            "matchedToSandwiched": 137076
+        }
+    }
+}

@@ -1,0 +1,9 @@
+.env
+*.key
+*.log
+target/
+venv/
+node_modules/
+dist/
+data/
+*.zip

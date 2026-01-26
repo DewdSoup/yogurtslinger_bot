@@ -1,0 +1,140 @@
+YOGURTSLINGER MEV – OPERATOR COMMANDS (FINAL)
+These commands are intentionally simple, idempotent, and safe.
+They abstract systemd, firewall, validator, ShredStream, and gRPC into a clean control surface.
+
+1. START EVERYTHING (ONE COMMAND)
+
+sudo mev-up
+What it does (in order):
+	1. Reloads systemd units
+	2. Applies firewall rules
+	3. Starts Jito ShredStream
+	4. Starts Agave validator
+	5. Prints full status
+Use this every morning or after a reboot.
+
+2. STOP EVERYTHING CLEANLY
+
+sudo mev-down
+What it does:
+	1. Gracefully stops Agave validator
+	2. Stops Jito ShredStream
+	3. Leaves firewall intact
+	4. Prints final service state
+Use this every night or before maintenance.
+
+3. STATUS (SERVICES + PORTS)
+
+sudo mev-status
+Shows:
+	• systemd status for:
+		○ firewall
+		○ shredstream
+		○ validator
+	• TCP ports:
+		○ 8899 (RPC)
+		○ 10000 (Yellowstone gRPC)
+		○ 11000 (ShredStream gRPC)
+	• UDP ports:
+		○ 8001 (gossip)
+		○ 8002 (TPU / ShredStream ingest)
+		○ 20000 (Jito unicast)
+This is your single source of truth.
+
+4. PORTS ONLY (FAST CHECK)
+
+sudo mev-ports
+Use when you just want to confirm sockets are bound.
+
+5. LIVE LOGS (BOTH PIPELINES)
+
+sudo mev-logs
+Tails:
+	• /mnt/ledger/logs/agave-validator.log
+	• /mnt/ledger/logs/jito-shredstream.log
+Use during:
+	• startup
+	• snapshot load
+	• replay
+	• debugging
+
+6. SNAPSHOT STATUS (SAFE, READ-ONLY)
+
+sudo mev-snapshot
+Shows:
+	• current snapshot files
+	• tmp downloads
+	• latest activity
+Does not delete anything.
+
+7. RPC HEALTH CHECK
+
+curl -s http://127.0.0.1:8899 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+Expected results:
+	• "ok" → fully synced
+	• "Node is unhealthy" → still catching up (normal during replay)
+
+8. SLOT PROGRESS (LOCAL)
+
+curl -s http://127.0.0.1:8899 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}'
+
+9. SLOT LAG (LOCAL VS NETWORK)
+
+LOCAL=$(curl -s http://127.0.0.1:8899 -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' | jq -r .result)
+NET=$(curl -s https://api.mainnet-beta.solana.com -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' | jq -r .result)
+echo "Behind: $((NET - LOCAL)) slots"
+
+10. gRPC CONFIRMATION
+Yellowstone (validator → MEV)
+
+sudo grpcurl -plaintext \
+  -import-path /etc/yogurtslinger/protos/yellowstone-grpc/yellowstone-grpc-proto/proto \
+  -proto geyser.proto \
+  127.0.0.1:10000 geyser.Geyser/GetVersion
+ShredStream (Jito → validator)
+
+sudo grpcurl -plaintext \
+  -import-path /etc/yogurtslinger/protos/mev-protos \
+  -proto shredstream.proto \
+  127.0.0.1:11000 list
+
+11. EMERGENCY HARD STOP (RARE)
+Only if systemd hangs:
+
+sudo systemctl kill -s SIGKILL agave-rpc-mainnet.service
+sudo systemctl kill -s SIGKILL jito-shredstream.service
+Then recover with:
+
+sudo mev-up
+
+DAILY OPERATOR FLOW (MENTAL MODEL)
+Morning
+
+sudo mev-up
+sudo mev-status
+During day
+
+sudo mev-logs
+Before trading
+
+getHealth == ok
+slot lag < ~1k
+Night
+
+sudo mev-down
+
+FINAL NOTE (IMPORTANT)
+	• You do not need to edit configs daily
+	• You do not need to touch systemd manually
+	• You do not need to chase new flags
+	• You do not need to babysit snapshots
+This is a production-grade MEV control plane now.
+If you want, next we can:
+	• Lock this as v1.0 GOLD
+	• Document recovery scenarios
+	• Or move directly into MEV ingestion + strategy wiring
+Just say which.

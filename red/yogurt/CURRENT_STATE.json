@@ -1,0 +1,180 @@
+{
+  "lastUpdated": "2026-01-26",
+  "updatedBy": "Multi-swap Fix Session",
+  "sessionSummary": "PumpSwap Layer 1 PROVEN. Single-swap 95.98%, Multi-swap 100% (k-invariant). Ready for RaydiumV4 validation.",
+
+  "activeLayer": 2,
+  "activeLayerName": "Proving Tools",
+
+  "layerStatus": {
+    "layer1_localCacheState": {
+      "status": "PROVEN_PUMPSWAP",
+      "subComponents": {
+        "dataPipeline": {
+          "description": "gRPC -> Pool Decoders -> Caches",
+          "status": "NOT_VALIDATED",
+          "notes": "Proving uses TX metadata. Cache population needs validation before production."
+        },
+        "mathEngines": {
+          "description": "Pool State -> Math Functions -> Swap Output",
+          "status": "CPMM_PROVEN",
+          "provenVenues": ["PumpSwap"],
+          "unprovenVenues": ["RaydiumV4", "RaydiumClmm", "MeteoraDlmm"],
+          "notes": "CPMM math proven for PumpSwap. RaydiumV4 uses same math - should validate quickly."
+        }
+      },
+      "blockers": []
+    },
+    "layer2_provingTools": {
+      "status": "working",
+      "notes": "prove-infrastructure.ts supports all venues via --venue flag"
+    },
+    "layer3_executionPipeline": {
+      "status": "not_started",
+      "blockers": ["Complete venue validation first"]
+    },
+    "layer4_predictionLayer": {
+      "status": "not_started",
+      "blockers": ["Layer 3 must be operational first"]
+    }
+  },
+
+  "currentVenue": "RaydiumV4",
+  "previousVenue": "PumpSwap",
+
+  "venueStatus": {
+    "pumpswap": {
+      "status": "PROVEN",
+      "validationReport": "docs/validation/PUMPSWAP_L2.md",
+      "layer3Ready": true,
+      "mathType": "CPMM",
+      "metrics": {
+        "singleSwap": { "passRate": "95.98%", "evaluated": 50027 },
+        "multiSwap": { "passRate": "100%", "evaluated": 14712, "method": "k-invariant" }
+      },
+      "knownIssues": [
+        "Token2022 pools use 0 bps fee (8 pools, 0.19% of swaps)",
+        "Dust trades have rounding noise (not actionable anyway)"
+      ]
+    },
+    "raydiumV4": {
+      "status": "NEXT",
+      "validationReport": null,
+      "layer3Ready": false,
+      "mathType": "CPMM",
+      "evidenceCount": 5782,
+      "evidenceWithOutput": 0,
+      "blocker": "capture-evidence.ts doesn't extract actual_output_amount for RaydiumV4",
+      "notes": "Same CPMM math as PumpSwap. BLOCKED: Need to fix output extraction or use k-invariant only.",
+      "options": [
+        "Fix capture-evidence.ts to extract RaydiumV4 outputs",
+        "Use k-invariant validation only (vault deltas available)",
+        "Re-run capture with fixed script"
+      ],
+      "expectedEffort": "MEDIUM - need capture fix first"
+    },
+    "raydiumClmm": {
+      "status": "not_started",
+      "mathType": "CLMM (concentrated liquidity)",
+      "evidenceCount": 1570,
+      "notes": "Different math - tick-based concentrated liquidity",
+      "expectedEffort": "HIGH - different math engine"
+    },
+    "meteoraDlmm": {
+      "status": "not_started",
+      "mathType": "DLMM (dynamic liquidity)",
+      "evidenceCount": 208,
+      "notes": "Different math - bin-based dynamic liquidity",
+      "expectedEffort": "HIGH - different math engine"
+    }
+  },
+
+  "nextActions": [
+    {
+      "priority": "P0",
+      "action": "Fix RaydiumV4 output extraction in capture-evidence.ts",
+      "details": "actual_output_amount is NULL for all 5,782 RaydiumV4 swaps. Need to extract from TX metadata.",
+      "file": "scripts/capture-evidence.ts",
+      "effort": "MEDIUM"
+    },
+    {
+      "priority": "P0-ALT",
+      "action": "OR: Use k-invariant validation for RaydiumV4",
+      "details": "Can validate with vault deltas only (no actual_output needed). Same approach that got 100% for PumpSwap multi-swap.",
+      "command": "npx tsx scripts/prove-infrastructure.ts --venue raydiumV4 --multi-swap --no-limit",
+      "effort": "LOW"
+    },
+    {
+      "priority": "P1",
+      "action": "Create RaydiumV4 validation report",
+      "details": "Create docs/validation/RAYDIUMV4_L2.md following PumpSwap template",
+      "effort": "LOW"
+    },
+    {
+      "priority": "P1",
+      "action": "Validate data pipeline",
+      "details": "Compare Layer 1 cache reserves to TX pre-balances",
+      "impact": "Production readiness for all venues",
+      "effort": "MEDIUM"
+    },
+    {
+      "priority": "P2",
+      "action": "Validate RaydiumClmm",
+      "details": "Different math - concentrated liquidity with ticks",
+      "effort": "HIGH"
+    },
+    {
+      "priority": "P3",
+      "action": "Validate MeteoraDlmm",
+      "details": "Different math - dynamic liquidity with bins",
+      "effort": "HIGH"
+    }
+  ],
+
+  "handoffInstructions": {
+    "forNextAgent": [
+      "1. Read MENTAL_MAP.md and LAYERS.md first",
+      "2. PumpSwap is PROVEN - don't re-validate unless issues found",
+      "3. RaydiumV4 is next - uses same CPMM math as PumpSwap",
+      "4. Run: npx tsx scripts/prove-infrastructure.ts --venue raydiumV4 --all-swaps --no-limit",
+      "5. If pass rate is low, investigate fee structure (may differ from 25 bps)",
+      "6. Create docs/validation/RAYDIUMV4_L2.md using PUMPSWAP_L2.md as template"
+    ],
+    "keyFiles": {
+      "provingScript": "scripts/prove-infrastructure.ts",
+      "mathEngine": "src/sim/math/constantProduct.ts",
+      "raydiumDecoder": "src/decode/programs/raydiumV4.ts",
+      "evidenceDb": "data/evidence/capture.db"
+    },
+    "commonIssues": [
+      "Fee structure may differ per venue - check GlobalConfig/AmmConfig",
+      "Direction parsing is unreliable - use vault deltas instead",
+      "Multi-swap: use k-invariant check, not per-leg validation"
+    ]
+  },
+
+  "evidence": {
+    "database": "data/evidence/capture.db",
+    "captureStats": {
+      "pumpswap": 84225,
+      "raydiumV4": 5782,
+      "raydiumClmm": 1570,
+      "meteoraDlmm": 208
+    }
+  },
+
+  "configuration": {
+    "pumpswap": {
+      "feeModel": "inputFee",
+      "feeBps": 25,
+      "mathType": "CPMM",
+      "status": "PROVEN"
+    },
+    "raydiumV4": {
+      "feeModel": "inputFee",
+      "feeBps": "UNKNOWN - verify from AmmConfig",
+      "mathType": "CPMM",
+      "status": "TO_VALIDATE"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "generated_at": "2025-12-11T10:01:52.094017Z",
+  "input_file": "helius_alpha_swaps.ndjson",
+  "data_quality": {
+    "total_swaps": 6,
+    "by_venue": {
+      "Raydium_V4": 6
+    },
+    "unique_tokens": 5,
+    "top_tokens": {
+      "5tcV2pSKLetrw9R1FDPVERSTvQjxcZQHkSy7MkGyemhn": 2,
+      "HsXc1YBmzpoMA6JQnwVW4Cj7epFVY62KJYQ1MM6V4zFH": 1,
+      "8UiPofjkbjqTqrymz4VY3wXxMcPjFuyq3Psofekymaca": 1,
+      "HeqCcMjmuV5s25J49YiJyT6bD5qWLkP88YPajBySniaV": 1,
+      "ARSDsFmHtyB3ay3HNAihWE5WLB9RvnjLeYFemvqVcmGt": 1
+    },
+    "price_stats": {
+      "min": 1.7899090035026157e-11,
+      "max": 14.588682793158666,
+      "median": 0.004476194351817757
+    },
+    "slot_range": {
+      "min": 385933746,
+      "max": 385934442
+    }
+  },
+  "same_slot_opportunities": [],
+  "summary": {
+    "total_opportunities": 0,
+    "profitable_after_fees": 0,
+    "best_spread_pct": 0,
+    "venues_analyzed": [
+      "Raydium_V4"
+    ]
+  }
+}

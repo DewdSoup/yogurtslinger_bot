@@ -1,0 +1,19 @@
+{
+    "grpcAddress": "127.0.0.1:10000",
+    "rpcUrl": "http://127.0.0.1:8899",
+
+    "monitorPumpSwap": true,
+    "monitorBondingCurve": false,
+
+    "minWhaleBuyLamports": 2000000000,
+    "simulatedBuyLamports": 200000000,
+    "positionTrackingWindowMs": 300000,
+
+    "dataDir": "./data/shadow",
+    "walletStatsFile": "wallet_stats.json",
+    "tradesLogFile": "trades_log.json",
+
+    "minTradesForWhitelist": 5,
+    "minWinRateForWhitelist": 0.55,
+    "minAvgProfitForWhitelist": 0.08
+}

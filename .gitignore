@@ -1,0 +1,22 @@
+# Build and Cache
+dist/
+target/
+node_modules/
+venv/
+__pycache__/
+
+# Data and Logs
+*.db
+*.sqlite
+*.log
+data/
+logs/
+yogurt.zip
+
+# Secrets
+.env
+*.key
+.mcp.json
+red/capture_data.zip
+*.jsonl
+shredstream-proxy/bins/*.bin

@@ -1,0 +1,25 @@
+{
+    "heliusApiKey": "2bb675f2-573f-4561-b57f-d351db310e5a",
+    "rpcUrl": "https://mainnet.helius-rpc.com/?api-key=2bb675f2-573f-4561-b57f-d351db310e5a",
+    "wsUrl": "wss://mainnet.helius-rpc.com/?api-key=2bb675f2-573f-4561-b57f-d351db310e5a",
+    "outFile": "./data/canonical_cases.ndjson",
+    "maxSignaturesPerPool": 2000,
+    "maxCasesPerPool": 250,
+    "concurrency": 8,
+    "rateLimitRps": 20,
+    "pumpswapPools": [
+        "6ef59PhPsXgre7d8BUB2J6GGK6RM3ABek6XSR7J3Z6kX",
+        "2uF4Xh61rDwxnG9woyxsVQP7zuA6kLFpb3NvnRQeoiSd",
+        "J3s2eaBdxaTEJd9NgHAvsRv88PuGSQWmrggyWxoEL587",
+        "DMAFL613XTipuA3jFNYczavWT7XsiYf9cR3qmRMZQhB6",
+        "H66r4cb3LrvEZowN6eJZxMVbjrzxmRzPRT7Z6aMEXunb",
+        "DUjFqjqJ69pSRQhGcZetD5QCaLANYY12TBWVFcpQXvKu"
+    ],
+    "raydiumV4Pools": [
+        "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2",
+        "7XawhbbxtsRcQA8KTkHT9f9nc6d69UwqCDh6U5EEbEmX",
+        "AVs9TA4nWDzfPJE9gGVNJMVhcQy3V9PGazuz33BfG2RA",
+        "8tzS7SkUZyHPQY7gLqsMCXZ5EDCgjESUHcB17tiR1h3Z",
+        "74bfmNqNe89JSMn7uwnBmuZ6k9J2j6CSuqC6q9F5hU7e"
+    ]
+}

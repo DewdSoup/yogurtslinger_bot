@@ -1,0 +1,111 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$ARGUMENTS\" | jq -e '.tool_input.file_path | test(\"src/sim/math/|src/decode/programs/|src/cache/\")' > /dev/null 2>&1; then .claude/hooks/layer1-prove.sh; fi",
+            "statusMessage": "Checking Layer 1 changes"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$ARGUMENTS\" | jq -e '.tool_input.file_path | test(\"CURRENT_STATE.json\")' > /dev/null 2>&1; then .claude/hooks/validate-state.sh; fi",
+            "statusMessage": "Validating state file"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "Glob",
+      "Grep",
+      "LS",
+      "Task",
+      "WebFetch",
+      "WebSearch",
+      "Bash(git:*)",
+      "Bash(pnpm:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ts-node:*)",
+      "Bash(tsx:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(diff:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(rm:*)",
+      "Bash(touch:*)",
+      "Bash(echo:*)",
+      "Bash(pwd:*)",
+      "Bash(jq:*)",
+      "Bash(sort:*)",
+      "Bash(awk:*)",
+      "Bash(sed:*)",
+      "Bash(ps:*)",
+      "Bash(systemctl status:*)",
+      "Bash(journalctl:*)",
+      "Bash(cargo:*)",
+      "Bash(solana:*)",
+      "Bash(chmod +x:*)",
+      "Bash(curl:*)",
+      "Bash(docker:*)",
+      "Bash(docker-compose:*)",
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(lsof:*)",
+      "Bash(nc:*)",
+      "Bash(timeout:*)",
+      "Bash(tsc:*)",
+      "Bash(date:*)",
+      "Bash(stat:*)",
+      "Bash(du:*)",
+      "Bash(free:*)",
+      "Bash(top -bn1:*)",
+      "Bash(env:*)",
+      "Bash(printenv:*)",
+      "Bash(which:*)",
+      "Bash(type:*)",
+      "Bash(file:*)",
+      "Bash(base64:*)",
+      "Bash(xxd:*)",
+      "Bash(hexdump:*)",
+      "Bash(sqlite3:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(sudo rm:*)",
+      "Bash(sudo dd:*)",
+      "Bash(dd if=:*)",
+      "Bash(mkfs:*)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(.env.production)",
+      "Read(secrets/**)",
+      "Read(~/.solana/id.json)"
+    ]
+  },
+  "env": {
+    "NODE_ENV": "production",
+    "LOG_LEVEL": "info"
+  }
+}
