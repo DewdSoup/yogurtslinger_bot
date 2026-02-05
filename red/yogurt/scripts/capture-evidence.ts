@@ -2304,7 +2304,51 @@ async function main(): Promise<void> {
                         // Calculate actual output from balance deltas
                         // Find the output mint in post balances and compare to pre
                         // Token balances use base58 mints, so convert our bytes to base58
-                        const outputMintB58 = bs58.encode(leg.outputMint);
+                        let outputMintB58 = bs58.encode(leg.outputMint);
+                        const isPlaceholderMint = leg.outputMint.every(b => b === 0);
+
+                        // FIX: For RaydiumV4 (and other venues that return placeholder mints),
+                        // extract the actual output mint from the instruction's destination token account.
+                        // RaydiumV4 account layout: index 16 = userDestToken
+                        // RaydiumClmm account layout: index 7 = tokenDestination (for swap_v2)
+                        if (isPlaceholderMint) {
+                            // Get the instruction that produced this leg
+                            const ix = compiledInstructions.find((instruction, _idx) => {
+                                // Match by program ID - crude but works for single-venue TXs
+                                const progId = accountKeysBytes[instruction.programIdIndex];
+                                if (!progId) return false;
+                                // Raydium V4: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
+                                const RAYDIUM_V4_B58 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+                                // Raydium CLMM: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK
+                                const RAYDIUM_CLMM_B58 = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
+                                const progIdB58 = bs58.encode(progId);
+                                return progIdB58 === RAYDIUM_V4_B58 || progIdB58 === RAYDIUM_CLMM_B58;
+                            });
+
+                            if (ix) {
+                                // Determine user destination account index based on venue
+                                const progId = accountKeysBytes[ix.programIdIndex];
+                                const progIdB58 = progId ? bs58.encode(progId) : '';
+                                let userDestIdx: number | undefined;
+
+                                if (progIdB58 === '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8') {
+                                    // RaydiumV4: account 16 = userDestToken
+                                    userDestIdx = ix.accountKeyIndexes[16];
+                                } else if (progIdB58 === 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK') {
+                                    // RaydiumClmm swap_v2: account 7 = tokenDestination
+                                    userDestIdx = ix.accountKeyIndexes[7];
+                                }
+
+                                if (userDestIdx !== undefined) {
+                                    // Find the mint for this token account in the balance arrays
+                                    const destAcctBal = postBalances.find((b: any) => b.account_index === userDestIdx);
+                                    if (destAcctBal && destAcctBal.mint) {
+                                        outputMintB58 = destAcctBal.mint;
+                                    }
+                                }
+                            }
+                        }
+
                         let actualOutput: string | null = null;
 
                         // Look through token balances to find output token delta

@@ -73,6 +73,15 @@ Pool decoders populate the cache. Instruction decoders parse transactions for ev
 - Does NOT handle pending/unconfirmed transactions
 - Does NOT predict future state
 
+### Cache Validation Status
+
+| Venue | Cache Validation | Report |
+|-------|------------------|--------|
+| PumpSwap | **VALIDATED** | `docs/validation/LOCAL_CACHE_VALIDATION.md` |
+| RaydiumV4 | **VALIDATED** | `docs/validation/LOCAL_CACHE_VALIDATION.md` |
+| RaydiumClmm | NOT_TESTED | - |
+| MeteoraDlmm | NOT_TESTED | - |
+
 ### Current Reality
 **Layer 1 infrastructure EXISTS but has GAPS.** The gaps are:
 - Pool decoders: WSOL normalization fixed, working correctly

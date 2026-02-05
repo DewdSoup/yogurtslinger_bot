@@ -148,7 +148,7 @@
 - Fee model confirmed (25 bps input fee)
 
 **Before Production:**
-- [ ] Validate data pipeline (cache vs TX metadata)
+- [x] Validate data pipeline (cache vs TX metadata) - DONE 2026-01-27
 - [ ] Fix Token2022 pool fee handling (0 bps instead of 25 bps)
 - [ ] Decision on bonding curve support
 

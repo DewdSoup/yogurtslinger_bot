@@ -80,7 +80,7 @@ let feeConfigCache: {
 
 /**
  * Derive FeeConfig PDA for PumpSwap
- * Seeds: ['fee_config', pumpswap_program_id]
+ * Seeds: ['fee_config', venueSwapswap_program_id]
  */
 async function deriveFeeConfigPDA(): Promise<string> {
     // Simple PDA derivation for our purposes
@@ -401,7 +401,7 @@ function calculateMarketCap(quoteReserve: bigint, baseReserve: bigint, baseMintS
     return (quoteReserve * baseMintSupply) / baseReserve;
 }
 
-type VenueText = 'pumpswap' | 'raydiumV4' | 'raydiumClmm' | 'meteoraDlmm';
+type VenueText = 'venueSwapswap' | 'raydiumV4' | 'raydiumClmm' | 'meteoraDlmm';
 
 type TokenBalanceRow = {
     account_index: number;
@@ -459,7 +459,7 @@ Proves Layer 1 infrastructure accuracy by comparing math output to on-chain resu
 NO WORKAROUNDS - fees must be resolved in Layer 1, not learned at runtime.
 
 Usage:
-  npx tsx scripts/prove-infrastructure.ts --db data/evidence/capture.db --venue pumpswap
+  npx tsx scripts/prove-infrastructure.ts --db data/evidence/capture.db --venue venueSwapswap
   npx tsx scripts/prove-infrastructure.ts --no-limit  # Evaluate all swaps
 
 Options:
@@ -467,7 +467,7 @@ Options:
   --swap-db <path>      Swap/tx DB path (if split)
   --cache-db <path>     Cache/topology DB path (if split)
   --session <id>        Capture session id (default: latest in parsed_swaps)
-  --venue <name>        pumpswap | raydiumV4 | raydiumClmm | meteoraDlmm | all (default: pumpswap)
+  --venue <name>        venueSwapswap | raydiumV4 | raydiumClmm | meteoraDlmm | all (default: venueSwapswap)
   --limit <n>           Max swaps to evaluate (default: 100000, use --no-limit for all)
   --no-limit            Evaluate all swaps (no limit)
   --fee-bps <n>         PumpSwap total fee in bps (default: 25 from GlobalConfig)
@@ -497,7 +497,7 @@ function parseArgs(argv: string[]): CliOpts {
         swapDb: undefined,
         cacheDb: undefined,
         session: undefined,
-        venue: 'pumpswap',
+        venue: 'venueSwapswap',
         limit: 100000,       // Default to 100k (use --no-limit for all)
         noLimit: false,
         feeBps: 25,
@@ -1018,11 +1018,12 @@ async function main(): Promise<void> {
     }
     console.log('');
 
-    // Only PumpSwap is fully validated in this first cut.
-    const pumps = rows.filter((r) => r.venue === 'pumpswap');
+    // Filter by selected venue (default venueSwapswap, or specified via --venue)
+    const targetVenue = opts.venue || 'venueSwapswap';
+    const venueSwaps = rows.filter((r) => r.venue === targetVenue);
 
-    if (pumps.length === 0) {
-        console.log('No PumpSwap swaps in this sample; nothing to validate yet.');
+    if (venueSwaps.length === 0) {
+        console.log(`No ${targetVenue} swaps in this sample; nothing to validate yet.`);
         process.exit(0);
     }
 
@@ -1140,13 +1141,13 @@ async function main(): Promise<void> {
     let processedCount = 0;
     const startTime = Date.now();
 
-    for (const r of pumps) {
+    for (const r of venueSwaps) {
         // Progress reporting every N swaps
         processedCount++;
         if (processedCount % PROGRESS_INTERVAL === 0) {
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
             const rate = (processedCount / ((Date.now() - startTime) / 1000)).toFixed(0);
-            console.log(`  [progress] ${processedCount.toLocaleString()} / ${pumps.length.toLocaleString()} processed (${elapsed}s, ${rate}/s, ${evaluated} evaluated)`);
+            console.log(`  [progress] ${processedCount.toLocaleString()} / ${venueSwaps.length.toLocaleString()} processed (${elapsed}s, ${rate}/s, ${evaluated} evaluated)`);
         }
 
         // Skip multi-swap transactions - they pollute reserve measurements
@@ -1420,7 +1421,7 @@ async function main(): Promise<void> {
 
     // Final progress message
     const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`  [complete] Processed ${pumps.length.toLocaleString()} swaps in ${totalElapsed}s`);
+    console.log(`  [complete] Processed ${venueSwaps.length.toLocaleString()} swaps in ${totalElapsed}s`);
     console.log('');
 
     console.log('PumpSwap validation sample:');
@@ -1432,7 +1433,7 @@ async function main(): Promise<void> {
     console.log(`  skipped (complex tx)      : ${skippedComplexTx.toLocaleString()}`);
     console.log(`  skipped (missing topology): ${skippedMissingTopo.toLocaleString()}`);
     console.log(`  skipped (missing balances): ${skippedMissingVaultBalances.toLocaleString()}`);
-    console.log(`  effective evaluated pct    : ${(pumps.length ? (100 * evaluated / pumps.length) : 0).toFixed(2)}% (${evaluated.toLocaleString()} / ${pumps.length.toLocaleString()})`);
+    console.log(`  effective evaluated pct    : ${(venueSwaps.length ? (100 * evaluated / venueSwaps.length) : 0).toFixed(2)}% (${evaluated.toLocaleString()} / ${venueSwaps.length.toLocaleString()})`);
     console.log('');
 
     // Print dynamic fee stats if enabled
@@ -1726,7 +1727,7 @@ async function main(): Promise<void> {
             venue: opts.venue,
             limit: opts.limit,
             toleranceBps: opts.toleranceBps,
-            pumpswapFeeBps: opts.feeBps,
+            venueSwapswapFeeBps: opts.feeBps,
             dynamicFeesEnabled: opts.dynamicFees,
         },
         dynamicFeeStats: opts.dynamicFees ? {
@@ -1741,7 +1742,7 @@ async function main(): Promise<void> {
                 maxLamports: marketCapDistribution[marketCapDistribution.length - 1]?.toString(),
             } : null,
         } : null,
-        pumpswap: {
+        venueSwapswap: {
             evaluated,
             skipped: {
                 multiSwap: skippedMultiSwap,

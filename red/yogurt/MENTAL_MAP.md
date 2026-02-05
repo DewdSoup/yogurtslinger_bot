@@ -54,8 +54,8 @@ This document captures the architectural design, data flow, and strategic ration
 │  - Source of truth for all downstream operations       │                   │
 │  - Eliminates RPC calls on hot path                    │                   │
 │                                                         │                   │
-│  CURRENT REALITY: Infrastructure exists but has gaps.  │                   │
-│  Layer 2 identifies and fixes these gaps.              │                   │
+│  CACHE: PumpSwap, RaydiumV4 VALIDATED.                 │                   │
+│  See: docs/validation/LOCAL_CACHE_VALIDATION.md        │                   │
 │                                                         │                   │
 │  NEVER MUTATED BY EXECUTION PIPELINE                   │                   │
 │                                                         │                   │
