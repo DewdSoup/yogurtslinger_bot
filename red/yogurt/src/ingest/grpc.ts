@@ -188,6 +188,9 @@ export class GrpcConsumer implements IngestConsumer {
     // gRPC subscription start slot - captured from FIRST response, immutable after set
     private grpcSubscriptionStartSlot: number | null = null;
 
+    // Latest blockhash from blocks_meta stream (L1 local state — zero-latency read)
+    private latestBlockhash: { blockhash: string; slot: number } | null = null;
+
     constructor(config: GrpcConfig) {
         this.config = config;
     }
@@ -316,6 +319,15 @@ export class GrpcConsumer implements IngestConsumer {
     }
 
     /**
+     * Get latest blockhash from L1 local state.
+     * Populated by blocks_meta gRPC subscription — zero latency, zero network calls.
+     * Returns null only before the first block_meta arrives from the stream.
+     */
+    getCachedBlockhash(): { blockhash: string; slot: number } | null {
+        return this.latestBlockhash;
+    }
+
+    /**
      * Get current metrics snapshot.
      */
     getMetrics(): {
@@ -409,10 +421,11 @@ export class GrpcConsumer implements IngestConsumer {
 
         const subscribeRequest: Record<string, any> = {
             accounts,
+            // blocks_meta streams SubscribeUpdateBlockMeta on each confirmed block.
+            // Provides blockhash as L1 local state — no RPC needed.
+            blocks_meta: { 'blockhash': {} },
             commitment: COMMITMENT_CONFIRMED,
         };
-        // Optional: from_slot can be set to request streaming from a specific slot
-        // If not set, server starts from current slot (default behavior)
 
         this.subscription.write(subscribeRequest);
         this.metrics.subscriptionUpdates++;
@@ -551,6 +564,18 @@ export class GrpcConsumer implements IngestConsumer {
                 resp: this.serializeForCapture(resp),
             };
             this.captureStream.write(JSON.stringify(captureRecord) + '\n');
+        }
+
+        // Cache blockhash from blocks_meta stream (L1 local state)
+        if (resp.block_meta) {
+            const meta = resp.block_meta;
+            if (meta.blockhash) {
+                const metaSlot = Number(meta.slot ?? 0);
+                if (!this.latestBlockhash || metaSlot >= this.latestBlockhash.slot) {
+                    this.latestBlockhash = { blockhash: meta.blockhash, slot: metaSlot };
+                }
+            }
+            return;
         }
 
         // Only process account updates (ignore slots, pings, etc.)
