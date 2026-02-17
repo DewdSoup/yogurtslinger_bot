@@ -1,5 +1,5 @@
 /**
- * PumpSwap Backrun Executor
+ * CPMM Backrun Executor (PumpSwap + RaydiumV4)
  *
  * End-to-end: gRPC L1 cache + ShredStream pending txs → backrun detection → Jito submission.
  *
@@ -16,6 +16,7 @@
  *   TIP_SOL                Jito tip amount (default: 0.001)
  *   CU_PRICE_MICROLAMPORTS Priority fee (default: 1000)
  *   SLIPPAGE_BPS           Slippage tolerance (default: 100 = 1%)
+ *   DRY_RUN                Log opportunities without submitting to Jito (default: 0)
  *   DEBUG                  Enable verbose logging (default: 0)
  */
 
@@ -41,6 +42,7 @@ const MIN_PROFIT_SOL = Number(process.env.MIN_PROFIT_SOL ?? '0.001');
 const TIP_SOL = Number(process.env.TIP_SOL ?? '0.001');
 const CU_PRICE = BigInt(process.env.CU_PRICE_MICROLAMPORTS ?? '1000');
 const SLIPPAGE_BPS = Number(process.env.SLIPPAGE_BPS ?? '100');
+const DRY_RUN = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
 
 // ============================================================================
 // Main
@@ -56,6 +58,9 @@ async function main() {
         Uint8Array.from(JSON.parse(readFileSync(KEYPAIR_PATH, 'utf-8'))),
     );
     console.log(`[backrun] payer=${payer.publicKey.toBase58()}`);
+    if (DRY_RUN) {
+        console.log('[backrun] *** DRY RUN MODE — bundles will NOT be submitted to Jito ***');
+    }
 
     let jitoAuthKeypair: Keypair | undefined;
     if (JITO_AUTH_PATH) {
@@ -96,15 +101,19 @@ async function main() {
     const bh = grpcConsumer.getCachedBlockhash()!;
     console.log(`[backrun] blockhash from L1 cache: ${bh.blockhash.slice(0, 12)}... (slot=${bh.slot})`);
 
-    // 4. Create Jito client
+    // 4. Create Jito client (connect even in dry-run for stats tracking)
     const jitoClient = createJitoClient({
         endpoint: JITO_ENDPOINT,
         timeoutMs: 5000,
         maxRetries: 3,
     });
-    jitoClient.connect(jitoAuthKeypair ?? payer);
-    jitoClient.subscribeBundleResults();
-    console.log(`[backrun] jito connected → ${JITO_ENDPOINT}`);
+    if (!DRY_RUN) {
+        jitoClient.connect(jitoAuthKeypair ?? payer);
+        jitoClient.subscribeBundleResults();
+        console.log(`[backrun] jito connected → ${JITO_ENDPOINT}`);
+    } else {
+        console.log('[backrun] jito skipped (dry-run)');
+    }
 
     // 5. Create backrun engine
     const engine = createBackrunEngine({
@@ -114,13 +123,14 @@ async function main() {
         jitoClient,
         minProfitLamports: BigInt(Math.floor(MIN_PROFIT_SOL * 1e9)),
         tipLamports: BigInt(Math.floor(TIP_SOL * 1e9)),
-        computeUnitLimit: 120_000,
+        computeUnitLimit: 200_000,
         computeUnitPrice: CU_PRICE,
         slippageBps: SLIPPAGE_BPS,
         getRecentBlockhash: () => {
             const cached = grpcConsumer.getCachedBlockhash();
             return cached ? cached.blockhash : bh.blockhash;
         },
+        dryRun: DRY_RUN,
     });
 
     // 6. Start ShredStream → wire to backrun engine
@@ -128,15 +138,15 @@ async function main() {
     shredConsumer.onEvent(engine.handleShredEvent);
     await shredConsumer.start();
     console.log(`[backrun] shredstream connected → ${SHRED_ENDPOINT}`);
-    console.log('[backrun] LIVE — watching for PumpSwap backrun opportunities');
+    console.log(`[backrun] LIVE — watching for PumpSwap + RaydiumV4 backrun opportunities${DRY_RUN ? ' (DRY RUN)' : ''}`);
 
     // 7. Stats every 10s
     const statsInterval = setInterval(() => {
         const s = engine.getStats();
         const p3 = phase3.getStats();
-        const j = jitoClient.getStats();
+        const j = DRY_RUN ? { bundlesLanded: 0n } : jitoClient.getStats();
         console.log(
-            `[stats] shred_txs=${s.shredTxsReceived} ps_swaps=${s.pumpswapSwapsDetected} ` +
+            `[stats] shred_txs=${s.shredTxsReceived} swaps=${s.swapsDetected} ` +
             `opps=${s.opportunitiesFound} bundles_built=${s.bundlesBuilt} ` +
             `submitted=${s.bundlesSubmitted} jito_landed=${j.bundlesLanded} ` +
             `profit=${(Number(s.totalProfitLamports) / 1e9).toFixed(6)}SOL ` +

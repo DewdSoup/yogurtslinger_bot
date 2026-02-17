@@ -7,6 +7,8 @@
     "scripts": {
         "build": "tsc",
         "evidence": "tsx scripts/capture-evidence.ts",
+        "analyze:cross-venue": "tsx scripts/analyze-cross-venue.ts",
+        "watch:cross-venue": "tsx scripts/watch-cross-venue.ts",
         "proof:topology": "tsx scripts/proof-topology-oracle.ts",
         "validate:topology": "tsx scripts/validate-topology-oracle-live.ts",
         "validate:sim": "tsx scripts/validate-simulation.ts",

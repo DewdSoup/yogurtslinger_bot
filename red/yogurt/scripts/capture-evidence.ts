@@ -2302,48 +2302,68 @@ async function main(): Promise<void> {
                     for (let legIndex = 0; legIndex < result.legs.length; legIndex++) {
                         const leg = result.legs[legIndex]!;
                         // Calculate actual output from balance deltas
-                        // Find the output mint in post balances and compare to pre
-                        // Token balances use base58 mints, so convert our bytes to base58
+                        // Token balances use base58 mints, so convert our bytes to base58.
+                        // For placeholder mints (notably RaydiumV4 without pool lookup), resolve from
+                        // source/destination token account balance metadata before persistence.
+                        let inputMintB58 = bs58.encode(leg.inputMint);
                         let outputMintB58 = bs58.encode(leg.outputMint);
-                        const isPlaceholderMint = leg.outputMint.every(b => b === 0);
+                        const inputMintPlaceholder = leg.inputMint.every(b => b === 0);
+                        const outputMintPlaceholder = leg.outputMint.every(b => b === 0);
 
-                        // FIX: For RaydiumV4 (and other venues that return placeholder mints),
-                        // extract the actual output mint from the instruction's destination token account.
-                        // RaydiumV4 account layout: index 16 = userDestToken
-                        // RaydiumClmm account layout: index 7 = tokenDestination (for swap_v2)
-                        if (isPlaceholderMint) {
-                            // Get the instruction that produced this leg
-                            const ix = compiledInstructions.find((instruction, _idx) => {
-                                // Match by program ID - crude but works for single-venue TXs
-                                const progId = accountKeysBytes[instruction.programIdIndex];
-                                if (!progId) return false;
-                                // Raydium V4: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
-                                const RAYDIUM_V4_B58 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
-                                // Raydium CLMM: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK
-                                const RAYDIUM_CLMM_B58 = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
-                                const progIdB58 = bs58.encode(progId);
-                                return progIdB58 === RAYDIUM_V4_B58 || progIdB58 === RAYDIUM_CLMM_B58;
-                            });
+                        if (inputMintPlaceholder || outputMintPlaceholder) {
+                            const RAYDIUM_V4_B58 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+                            const RAYDIUM_CLMM_B58 = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
 
-                            if (ix) {
-                                // Determine user destination account index based on venue
-                                const progId = accountKeysBytes[ix.programIdIndex];
-                                const progIdB58 = progId ? bs58.encode(progId) : '';
-                                let userDestIdx: number | undefined;
+                            // Select matching swap instruction in same-venue ordinal order.
+                            const venueProgramB58 = leg.venue === VenueId.RaydiumV4
+                                ? RAYDIUM_V4_B58
+                                : leg.venue === VenueId.RaydiumClmm
+                                    ? RAYDIUM_CLMM_B58
+                                    : null;
 
-                                if (progIdB58 === '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8') {
-                                    // RaydiumV4: account 16 = userDestToken
-                                    userDestIdx = ix.accountKeyIndexes[16];
-                                } else if (progIdB58 === 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK') {
-                                    // RaydiumClmm swap_v2: account 7 = tokenDestination
-                                    userDestIdx = ix.accountKeyIndexes[7];
+                            if (venueProgramB58) {
+                                const matchingIxs = compiledInstructions.filter((instruction) => {
+                                    const progId = accountKeysBytes[instruction.programIdIndex];
+                                    if (!progId) return false;
+                                    return bs58.encode(progId) === venueProgramB58;
+                                });
+
+                                let venueOrdinal = 0;
+                                for (let j = 0; j < legIndex; j++) {
+                                    if (result.legs[j]?.venue === leg.venue) {
+                                        venueOrdinal++;
+                                    }
                                 }
 
-                                if (userDestIdx !== undefined) {
-                                    // Find the mint for this token account in the balance arrays
-                                    const destAcctBal = postBalances.find((b: any) => b.account_index === userDestIdx);
-                                    if (destAcctBal && destAcctBal.mint) {
-                                        outputMintB58 = destAcctBal.mint;
+                                const ix = matchingIxs[venueOrdinal] ?? matchingIxs[0];
+                                if (ix) {
+                                    let userSourceIdx: number | undefined;
+                                    let userDestIdx: number | undefined;
+
+                                    if (venueProgramB58 === RAYDIUM_V4_B58) {
+                                        // RaydiumV4: source=15, dest=16
+                                        userSourceIdx = ix.accountKeyIndexes[15];
+                                        userDestIdx = ix.accountKeyIndexes[16];
+                                    } else if (venueProgramB58 === RAYDIUM_CLMM_B58) {
+                                        // RaydiumClmm swap_v2: source=3, dest=4
+                                        userSourceIdx = ix.accountKeyIndexes[3];
+                                        userDestIdx = ix.accountKeyIndexes[4];
+                                    }
+
+                                    if (inputMintPlaceholder && userSourceIdx !== undefined) {
+                                        const srcAcctBal = preBalances.find((b: any) => b.account_index === userSourceIdx)
+                                            ?? postBalances.find((b: any) => b.account_index === userSourceIdx);
+                                        if (srcAcctBal?.mint) {
+                                            inputMintB58 = srcAcctBal.mint;
+                                        }
+                                    }
+
+                                    if (outputMintPlaceholder && userDestIdx !== undefined) {
+                                        const destAcctBal = postBalances.find((b: any) => b.account_index === userDestIdx)
+                                            ?? preBalances.find((b: any) => b.account_index === userDestIdx);
+                                        if (destAcctBal?.mint) {
+                                            outputMintB58 = destAcctBal.mint;
+                                        }
                                     }
                                 }
                             }
@@ -2386,6 +2406,23 @@ async function main(): Promise<void> {
                             stats.plane7_noOutput++;
                         }
 
+                        let persistedInputMintHex = toHex(leg.inputMint);
+                        let persistedOutputMintHex = toHex(leg.outputMint);
+                        if (inputMintPlaceholder && inputMintB58 !== '11111111111111111111111111111111') {
+                            try {
+                                persistedInputMintHex = toHex(bs58.decode(inputMintB58));
+                            } catch {
+                                // Keep placeholder hex on decode failure
+                            }
+                        }
+                        if (outputMintPlaceholder && outputMintB58 !== '11111111111111111111111111111111') {
+                            try {
+                                persistedOutputMintHex = toHex(bs58.decode(outputMintB58));
+                            } catch {
+                                // Keep placeholder hex on decode failure
+                            }
+                        }
+
                         enqueueWrite(() =>
                             stmtSwap.run(
                                 sessionId,
@@ -2395,8 +2432,8 @@ async function main(): Promise<void> {
                                 venueName,
                                 toHex(leg.pool),
                                 leg.direction,
-                                toHex(leg.inputMint),
-                                toHex(leg.outputMint),
+                                persistedInputMintHex,
+                                persistedOutputMintHex,
                                 String(leg.inputAmount),
                                 String(leg.minOutputAmount),
                                 actualOutput,

@@ -1,7 +1,7 @@
 /**
- * Jito Bundle Builder (Phase 8)
+ * Jito Bundle Builder
  *
- * Constructs Jito bundles for PumpSwap backrun execution.
+ * Constructs Jito bundles for CPMM backrun execution (PumpSwap + RaydiumV4).
  * Builds swap instructions, tip, and assembles into V0 transactions.
  */
 
@@ -15,10 +15,9 @@ import {
     ComputeBudgetProgram,
 } from '@solana/web3.js';
 import type {
-    Opportunity,
     BundleConfig,
-    PoolState,
     PumpSwapPool,
+    RaydiumV4Pool,
     SwapDirection,
 } from '../types.js';
 import { VenueId, SwapDirection as Dir } from '../types.js';
@@ -44,8 +43,15 @@ const JITO_TIP_ACCOUNTS = [
 const PUMPSWAP_PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
 
 // PumpSwap swap discriminators (Anchor sighash)
-const BUY_DISC = Buffer.from('66063d1201daebea', 'hex');
-const SELL_DISC = Buffer.from('33e685a4017f83ad', 'hex');
+const PS_BUY_DISC = Buffer.from('66063d1201daebea', 'hex');
+const PS_SELL_DISC = Buffer.from('33e685a4017f83ad', 'hex');
+
+// RaydiumV4 program
+const RAYDIUMV4_PROGRAM = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
+
+// RaydiumV4 SwapV2 discriminators (single-byte, native program)
+const RV4_SWAP_BASE_IN_V2 = 16;
+const RV4_SWAP_BASE_OUT_V2 = 17;
 
 // Well-known program IDs
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -53,6 +59,9 @@ const TOKEN_2022_PROGRAM = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEp
 const SYSTEM_PROGRAM = new PublicKey('11111111111111111111111111111111');
 const ASSOC_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const GLOBAL_CONFIG = new PublicKey('ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw');
+
+// AMM Authority seed for RaydiumV4
+const AMM_AUTHORITY_SEED = Buffer.from('amm authority');
 
 // Event authority PDA (cached)
 let _eventAuthority: PublicKey | null = null;
@@ -66,6 +75,20 @@ function getEventAuthority(): PublicKey {
     return _eventAuthority;
 }
 
+// RaydiumV4 AMM Authority PDA (cached per nonce)
+const _ammAuthorityCache = new Map<number, PublicKey>();
+function getAmmAuthority(nonce: number): PublicKey {
+    let auth = _ammAuthorityCache.get(nonce);
+    if (!auth) {
+        auth = PublicKey.createProgramAddressSync(
+            [AMM_AUTHORITY_SEED, Buffer.from([nonce])],
+            RAYDIUMV4_PROGRAM,
+        );
+        _ammAuthorityCache.set(nonce, auth);
+    }
+    return auth;
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -77,12 +100,12 @@ export interface BuildResult {
     buildLatencyUs: number;
 }
 
-/** Parameters for a single PumpSwap swap instruction */
+/** Parameters for a single swap instruction */
 export interface SwapParams {
     direction: SwapDirection;
     inputAmount: bigint;
     minOutput: bigint;
-    pool: PumpSwapPool;
+    pool: PumpSwapPool | RaydiumV4Pool;
 }
 
 // ============================================================================
@@ -105,7 +128,7 @@ function buildPumpSwapSwapIx(
     payer: PublicKey,
     params: SwapParams,
 ): TransactionInstruction {
-    const pool = params.pool;
+    const pool = params.pool as PumpSwapPool;
     const poolPk = new PublicKey(pool.pool);
     const baseMint = new PublicKey(pool.baseMint);
     const quoteMint = new PublicKey(pool.quoteMint);
@@ -118,12 +141,12 @@ function buildPumpSwapSwapIx(
     const data = Buffer.alloc(24);
     if (params.direction === Dir.BtoA) {
         // BUY: [disc, baseAmountOut (desired output), maxQuoteAmountIn]
-        BUY_DISC.copy(data, 0);
+        PS_BUY_DISC.copy(data, 0);
         data.writeBigUInt64LE(params.minOutput, 8);   // desired base out
         data.writeBigUInt64LE(params.inputAmount, 16); // max quote in
     } else {
         // SELL: [disc, baseAmountIn (exact input), minQuoteAmountOut]
-        SELL_DISC.copy(data, 0);
+        PS_SELL_DISC.copy(data, 0);
         data.writeBigUInt64LE(params.inputAmount, 8);  // exact base in
         data.writeBigUInt64LE(params.minOutput, 16);   // min quote out
     }
@@ -154,12 +177,98 @@ function buildPumpSwapSwapIx(
     });
 }
 
+/**
+ * Build RaydiumV4 SwapV2 instruction (8 accounts, no OpenBook dependency).
+ *
+ * SwapBaseInV2 (disc=16): exact input → minimum output
+ * SwapBaseOutV2 (disc=17): maximum input → exact output
+ *
+ * Account layout:
+ *   0 - Token Program
+ *   1 - AMM (pool)
+ *   2 - AMM Authority (PDA from seeds ["amm authority", nonce])
+ *   3 - AMM Coin Vault (baseVault)
+ *   4 - AMM PC Vault (quoteVault)
+ *   5 - User Source Token
+ *   6 - User Dest Token
+ *   7 - User Wallet (signer)
+ */
+function buildRaydiumV4SwapIx(
+    payer: PublicKey,
+    params: SwapParams,
+): TransactionInstruction {
+    const pool = params.pool as RaydiumV4Pool;
+    const poolPk = new PublicKey(pool.pool);
+    const baseMint = new PublicKey(pool.baseMint);
+    const quoteMint = new PublicKey(pool.quoteMint);
+    const baseVault = new PublicKey(pool.baseVault);
+    const quoteVault = new PublicKey(pool.quoteVault);
+    const ammAuthority = getAmmAuthority(pool.nonce);
+
+    // Determine source/dest based on direction
+    // AtoB = base→quote (sell base for quote): source=baseATA, dest=quoteATA
+    // BtoA = quote→base (buy base with quote): source=quoteATA, dest=baseATA
+    const userBaseATA = deriveATA(payer, baseMint);
+    const userQuoteATA = deriveATA(payer, quoteMint);
+
+    let userSource: PublicKey;
+    let userDest: PublicKey;
+    if (params.direction === Dir.AtoB) {
+        userSource = userBaseATA;
+        userDest = userQuoteATA;
+    } else {
+        userSource = userQuoteATA;
+        userDest = userBaseATA;
+    }
+
+    // Build instruction data (17 bytes): disc(1) + amount1(8) + amount2(8)
+    const data = Buffer.alloc(17);
+    if (params.direction === Dir.AtoB) {
+        // SwapBaseInV2: exact input, minimum output
+        data[0] = RV4_SWAP_BASE_IN_V2;
+        data.writeBigUInt64LE(params.inputAmount, 1);
+        data.writeBigUInt64LE(params.minOutput, 9);
+    } else {
+        // SwapBaseOutV2: max input, exact output
+        data[0] = RV4_SWAP_BASE_OUT_V2;
+        data.writeBigUInt64LE(params.inputAmount, 1);  // max amount in
+        data.writeBigUInt64LE(params.minOutput, 9);     // desired amount out
+    }
+
+    const keys = [
+        { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },   // 0 tokenProgram
+        { pubkey: poolPk, isSigner: false, isWritable: true },           // 1 amm
+        { pubkey: ammAuthority, isSigner: false, isWritable: false },    // 2 ammAuthority
+        { pubkey: baseVault, isSigner: false, isWritable: true },        // 3 ammCoinVault
+        { pubkey: quoteVault, isSigner: false, isWritable: true },       // 4 ammPcVault
+        { pubkey: userSource, isSigner: false, isWritable: true },       // 5 userSourceToken
+        { pubkey: userDest, isSigner: false, isWritable: true },         // 6 userDestToken
+        { pubkey: payer, isSigner: true, isWritable: true },             // 7 userWallet
+    ];
+
+    return new TransactionInstruction({
+        programId: RAYDIUMV4_PROGRAM,
+        keys,
+        data,
+    });
+}
+
+/**
+ * Build swap instruction for the appropriate venue
+ */
+function buildSwapIx(payer: PublicKey, params: SwapParams): TransactionInstruction {
+    if (params.pool.venue === VenueId.RaydiumV4) {
+        return buildRaydiumV4SwapIx(payer, params);
+    }
+    return buildPumpSwapSwapIx(payer, params);
+}
+
 // ============================================================================
 // Bundle Assembly
 // ============================================================================
 
 /**
- * Build Jito bundle for PumpSwap backrun.
+ * Build Jito bundle for CPMM backrun.
  *
  * Bundle structure: [victimTx, ourTx(CU + swap1 + swap2 + tip)]
  */
@@ -188,11 +297,11 @@ export function buildBundle(
             );
         }
 
-        // Swap 1 (opposite of victim — enter position)
-        instructions.push(buildPumpSwapSwapIx(payer.publicKey, swap1));
+        // Swap 1 (enter position)
+        instructions.push(buildSwapIx(payer.publicKey, swap1));
 
-        // Swap 2 (same as victim — close position)
-        instructions.push(buildPumpSwapSwapIx(payer.publicKey, swap2));
+        // Swap 2 (close position)
+        instructions.push(buildSwapIx(payer.publicKey, swap2));
 
         // Tip (inline in same tx)
         const tipAccount = selectTipAccount();
@@ -260,7 +369,7 @@ export function selectTipAccount(): string {
 }
 
 /**
- * Estimate compute units for backrun (2 PumpSwap swaps + tip)
+ * Estimate compute units for backrun (2 swaps + tip)
  */
 export function estimateComputeUnits(venue: number): number {
     const baseEstimates: Record<number, number> = {

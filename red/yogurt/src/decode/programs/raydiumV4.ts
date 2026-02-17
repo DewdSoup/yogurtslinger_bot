@@ -80,6 +80,7 @@ export function decodeRaydiumV4Pool(
         lpMint: data.slice(464, 496),
         openOrders: data.slice(496, 528),
         targetOrders: data.slice(592, 624),
+        nonce: Number(view.getBigUint64(8, true)),
         baseDecimal: Number(baseDecimalU64),
         quoteDecimal: Number(quoteDecimalU64),
         status: view.getBigUint64(0, true),

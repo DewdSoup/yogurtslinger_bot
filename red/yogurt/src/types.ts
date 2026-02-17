@@ -124,6 +124,7 @@ export interface RaydiumV4Pool {
     lpMint: Uint8Array;
     openOrders: Uint8Array;
     targetOrders: Uint8Array;
+    nonce: number;
     baseDecimal: number;
     quoteDecimal: number;
     status: bigint;

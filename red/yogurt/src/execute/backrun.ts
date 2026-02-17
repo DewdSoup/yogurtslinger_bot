@@ -1,7 +1,7 @@
 /**
- * PumpSwap Backrun Detection + Execution Engine
+ * CPMM Backrun Detection + Execution Engine
  *
- * Hot path: ShredStream pending tx → decode PumpSwap swap → read L1 cache →
+ * Hot path: ShredStream pending tx → decode swap (PumpSwap or RaydiumV4) → read L1 cache →
  * simulate victim → simulate round-trip → profit check → build bundle → submit.
  *
  * All cache reads and math are synchronous. Only Jito submission is async (fire-and-forget).
@@ -14,7 +14,9 @@ import type {
     SwapLeg,
     CompiledInstruction,
     PumpSwapPool,
+    RaydiumV4Pool,
     BundleConfig,
+    PoolState,
 } from '../types.js';
 import { VenueId, SwapDirection } from '../types.js';
 import {
@@ -22,13 +24,16 @@ import {
     getAmountIn,
 } from '../sim/math/constantProduct.js';
 import { isPumpSwapSwap, decodePumpSwapInstruction } from '../decode/programs/pumpswap.js';
+import { isRaydiumV4Swap, decodeRaydiumV4Instruction } from '../decode/programs/raydiumV4.js';
 import { buildBundle, estimateComputeUnits } from './bundle.js';
 import type { SwapParams } from './bundle.js';
 import type { JitoClient } from './submit.js';
 
 // ============================================================================
-// PumpSwap program ID bytes (for fast program ID matching)
+// Program ID bytes (for fast program ID matching in hot path)
 // ============================================================================
+
+// PumpSwap: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
 const PUMPSWAP_BYTES = new Uint8Array([
     0x0c, 0x14, 0xde, 0xfc, 0x82, 0x5e, 0xc6, 0x76,
     0x94, 0x25, 0x08, 0x18, 0xbb, 0x65, 0x40, 0x65,
@@ -36,7 +41,15 @@ const PUMPSWAP_BYTES = new Uint8Array([
     0xd4, 0xf8, 0x09, 0x0c, 0x18, 0xe9, 0xa8, 0x63,
 ]);
 
-// Candidate input sizes for optimal sizing (in lamports)
+// RaydiumV4: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
+const RAYDIUMV4_BYTES = new Uint8Array([
+    0x4b, 0xd9, 0x49, 0xc4, 0x36, 0x02, 0xc3, 0x3f,
+    0x20, 0x77, 0x90, 0xed, 0x16, 0xa3, 0x52, 0x4c,
+    0xa1, 0xb9, 0x97, 0x5c, 0xf1, 0x21, 0xa2, 0xa9,
+    0x0c, 0xff, 0xec, 0x7d, 0xf8, 0xb6, 0x8a, 0xcd,
+]);
+
+// Candidate input sizes for optimal sizing (in lamports — always SOL-denominated)
 const SIZE_CANDIDATES = [
     10_000_000n,     // 0.01 SOL
     50_000_000n,     // 0.05 SOL
@@ -51,7 +64,7 @@ const SIZE_CANDIDATES = [
 // ============================================================================
 
 export interface BackrunConfig {
-    poolCache: { get(pubkey: Uint8Array): { state: PumpSwapPool; slot: number } | null };
+    poolCache: { get(pubkey: Uint8Array): { state: PoolState; slot: number } | null };
     vaultCache: { get(pubkey: Uint8Array): { amount: bigint; slot: number } | null };
     payerKeypair: Keypair;
     jitoClient: JitoClient;
@@ -61,11 +74,12 @@ export interface BackrunConfig {
     computeUnitPrice: bigint;
     slippageBps: number;
     getRecentBlockhash: () => string;
+    dryRun?: boolean;
 }
 
 export interface BackrunStats {
     shredTxsReceived: bigint;
-    pumpswapSwapsDetected: bigint;
+    swapsDetected: bigint;
     opportunitiesFound: bigint;
     bundlesBuilt: bigint;
     bundlesSubmitted: bigint;
@@ -73,7 +87,7 @@ export interface BackrunStats {
 }
 
 // ============================================================================
-// Message Parsing (inline, minimal — just enough for PumpSwap leg extraction)
+// Message Parsing (inline, minimal — just enough for swap leg extraction)
 // ============================================================================
 
 function pubkeyMatch(a: Uint8Array, b: Uint8Array): boolean {
@@ -171,13 +185,62 @@ function parseMessageMinimal(msg: Uint8Array): ParsedMessage | null {
 }
 
 // ============================================================================
+// Pool Enrichment
+// ============================================================================
+
+type EnrichedPool = (PumpSwapPool | RaydiumV4Pool) & {
+    baseReserve: bigint;
+    quoteReserve: bigint;
+    lpFeeBps: bigint;
+    protocolFeeBps: bigint;
+};
+
+function enrichPumpSwapPool(
+    pool: PumpSwapPool,
+    baseAmount: bigint,
+    quoteAmount: bigint,
+): EnrichedPool {
+    return {
+        ...pool,
+        baseReserve: baseAmount,
+        quoteReserve: quoteAmount,
+        lpFeeBps: pool.lpFeeBps ?? 20n,
+        protocolFeeBps: pool.protocolFeeBps ?? 5n,
+    };
+}
+
+function enrichRaydiumV4Pool(
+    pool: RaydiumV4Pool,
+    baseAmount: bigint,
+    quoteAmount: bigint,
+): EnrichedPool {
+    // PnL adjustment: effective reserves = vault balance - needTakePnl
+    const baseReserve = baseAmount - pool.baseNeedTakePnl;
+    const quoteReserve = quoteAmount - pool.quoteNeedTakePnl;
+
+    // Convert swapFeeNumerator/Denominator → bps
+    // RV4 bakes LP + protocol fee into a single numerator/denominator
+    const feeBps = pool.swapFeeDenominator > 0n
+        ? (pool.swapFeeNumerator * 10000n) / pool.swapFeeDenominator
+        : 25n;
+
+    return {
+        ...pool,
+        baseReserve,
+        quoteReserve,
+        lpFeeBps: feeBps,
+        protocolFeeBps: 0n,
+    };
+}
+
+// ============================================================================
 // Engine
 // ============================================================================
 
 export function createBackrunEngine(config: BackrunConfig) {
     const stats: BackrunStats = {
         shredTxsReceived: 0n,
-        pumpswapSwapsDetected: 0n,
+        swapsDetected: 0n,
         opportunitiesFound: 0n,
         bundlesBuilt: 0n,
         bundlesSubmitted: 0n,
@@ -204,16 +267,24 @@ export function createBackrunEngine(config: BackrunConfig) {
         const parsed = parseMessageMinimal(update.message);
         if (!parsed || parsed.instructions.length === 0) return;
 
-        // Scan for PumpSwap swap instructions
+        // Scan for CPMM swap instructions (PumpSwap + RaydiumV4)
         for (const ix of parsed.instructions) {
             const programId = parsed.accountKeys[ix.programIdIndex];
-            if (!programId || !pubkeyMatch(programId, PUMPSWAP_BYTES)) continue;
-            if (!isPumpSwapSwap(ix.data)) continue;
+            if (!programId) continue;
 
-            const leg = decodePumpSwapInstruction(ix, parsed.accountKeys);
+            let leg: SwapLeg | null = null;
+
+            if (pubkeyMatch(programId, PUMPSWAP_BYTES)) {
+                if (!isPumpSwapSwap(ix.data)) continue;
+                leg = decodePumpSwapInstruction(ix, parsed.accountKeys);
+            } else if (pubkeyMatch(programId, RAYDIUMV4_BYTES)) {
+                if (!isRaydiumV4Swap(ix.data)) continue;
+                leg = decodeRaydiumV4Instruction(ix, parsed.accountKeys);
+            }
+
             if (!leg) continue;
 
-            stats.pumpswapSwapsDetected++;
+            stats.swapsDetected++;
             processLeg(leg, update);
         }
     }
@@ -222,32 +293,48 @@ export function createBackrunEngine(config: BackrunConfig) {
         // Look up pool in L1 cache
         const poolEntry = config.poolCache.get(leg.pool);
         if (!poolEntry) return;
-        const pool = poolEntry.state as PumpSwapPool;
+
+        const pool = poolEntry.state;
+        const venue = pool.venue;
+
+        // Only handle CPMM venues
+        if (venue !== VenueId.PumpSwap && venue !== VenueId.RaydiumV4) return;
 
         // Look up vault balances
-        const baseVaultEntry = config.vaultCache.get(pool.baseVault);
-        const quoteVaultEntry = config.vaultCache.get(pool.quoteVault);
+        const baseVault = (pool as PumpSwapPool | RaydiumV4Pool).baseVault;
+        const quoteVault = (pool as PumpSwapPool | RaydiumV4Pool).quoteVault;
+        const baseVaultEntry = config.vaultCache.get(baseVault);
+        const quoteVaultEntry = config.vaultCache.get(quoteVault);
         if (!baseVaultEntry || !quoteVaultEntry) return;
 
-        // Enrich pool with reserves + fees
-        const enrichedPool: PumpSwapPool = {
-            ...pool,
-            baseReserve: baseVaultEntry.amount,
-            quoteReserve: quoteVaultEntry.amount,
-            lpFeeBps: pool.lpFeeBps ?? 20n,
-            protocolFeeBps: pool.protocolFeeBps ?? 5n,
-        };
+        // Enrich pool with reserves + fees (venue-specific)
+        let enrichedPool: EnrichedPool;
+        if (venue === VenueId.PumpSwap) {
+            enrichedPool = enrichPumpSwapPool(
+                pool as PumpSwapPool,
+                baseVaultEntry.amount,
+                quoteVaultEntry.amount,
+            );
+        } else {
+            enrichedPool = enrichRaydiumV4Pool(
+                pool as RaydiumV4Pool,
+                baseVaultEntry.amount,
+                quoteVaultEntry.amount,
+            );
+        }
+
+        // Validate reserves are positive
+        if (enrichedPool.baseReserve <= 0n || enrichedPool.quoteReserve <= 0n) return;
+
+        const totalFeeBps = enrichedPool.lpFeeBps + enrichedPool.protocolFeeBps;
 
         // Determine victim's actual input amount
         let victimInput: bigint;
-        const totalFeeBps = (enrichedPool.lpFeeBps ?? 20n) + (enrichedPool.protocolFeeBps ?? 5n);
 
         if (leg.exactSide === 'output') {
-            // BUY: user specified exact output, we need to back-calculate input
-            // The desired output is minOutputAmount (which is the exact amount for buys)
             const reserves = leg.direction === SwapDirection.BtoA
-                ? { reserveIn: enrichedPool.quoteReserve!, reserveOut: enrichedPool.baseReserve! }
-                : { reserveIn: enrichedPool.baseReserve!, reserveOut: enrichedPool.quoteReserve! };
+                ? { reserveIn: enrichedPool.quoteReserve, reserveOut: enrichedPool.baseReserve }
+                : { reserveIn: enrichedPool.baseReserve, reserveOut: enrichedPool.quoteReserve };
             victimInput = getAmountIn(
                 leg.minOutputAmount,
                 reserves.reserveIn,
@@ -255,7 +342,7 @@ export function createBackrunEngine(config: BackrunConfig) {
                 totalFeeBps,
             );
             if (victimInput <= 0n || victimInput > leg.inputAmount) {
-                victimInput = leg.inputAmount; // fallback to max
+                victimInput = leg.inputAmount;
             }
         } else {
             victimInput = leg.inputAmount;
@@ -264,7 +351,7 @@ export function createBackrunEngine(config: BackrunConfig) {
         // Simulate victim swap
         const victimResult = simulateConstantProduct({
             pool: leg.pool,
-            venue: VenueId.PumpSwap,
+            venue,
             direction: leg.direction,
             inputAmount: victimInput,
             poolState: enrichedPool,
@@ -272,9 +359,39 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         if (!victimResult.success) return;
 
-        // Determine our round-trip directions
-        const ourDir1 = leg.direction === SwapDirection.AtoB ? SwapDirection.BtoA : SwapDirection.AtoB;
-        const ourDir2 = leg.direction; // close position = same as victim
+        // ====================================================================
+        // Round-trip backrun: always start and end in SOL (quote side)
+        //
+        // For SOL-paired pools (base=token, quote=SOL):
+        //   BtoA = SOL→token (buy), AtoB = token→SOL (sell)
+        //
+        // Our round-trip must be SOL-in → SOL-out:
+        //   Swap1: BtoA (SOL→token) — enter position
+        //   Swap2: AtoB (token→SOL) — close position
+        //
+        // We profit when the victim's swap created a price dislocation
+        // that we can exploit by trading in the opposite direction.
+        //
+        // For victim BtoA (buy token): price goes up → we buy BEFORE is not
+        //   possible (backrun), so we sell token (AtoB) at inflated price.
+        //   But we need tokens to sell → this is actually:
+        //   We need the round-trip where candidateInput is SOL:
+        //     Swap1: BtoA (SOL→token) on post-victim state
+        //     Swap2: AtoB (token→SOL) on post-swap1 state
+        //   Profit = swap2 SOL out - candidateInput SOL in
+        //
+        // For victim AtoB (sell token): price goes down → we buy cheap:
+        //     Swap1: BtoA (SOL→token) on post-victim state — get cheap tokens
+        //     Swap2: AtoB (token→SOL) on post-swap1 state — sell tokens
+        //   Same round-trip direction regardless of victim direction.
+        //
+        // The key insight: our round-trip is ALWAYS BtoA then AtoB.
+        // SIZE_CANDIDATES are always in SOL lamports.
+        // Profit is always in SOL lamports.
+        // ====================================================================
+
+        const ourDir1 = SwapDirection.BtoA; // SOL → token (enter)
+        const ourDir2 = SwapDirection.AtoB; // token → SOL (close)
 
         // Try candidate sizes, pick max profit
         let bestProfit = -1n;
@@ -283,27 +400,30 @@ export function createBackrunEngine(config: BackrunConfig) {
         let bestSwap2Out = 0n;
 
         for (const candidateInput of SIZE_CANDIDATES) {
-            // Swap 1: enter position (opposite of victim)
+            // Skip if candidate exceeds quote reserve (can't buy more than exists)
+            if (candidateInput >= (victimResult.newPoolState as PumpSwapPool | RaydiumV4Pool).quoteReserve!) continue;
+
+            // Swap 1: SOL → token (BtoA) on post-victim state
             const swap1 = simulateConstantProduct({
                 pool: leg.pool,
-                venue: VenueId.PumpSwap,
+                venue,
                 direction: ourDir1,
                 inputAmount: candidateInput,
                 poolState: victimResult.newPoolState,
             });
             if (!swap1.success || swap1.outputAmount === 0n) continue;
 
-            // Swap 2: close position (same direction as victim)
+            // Swap 2: token → SOL (AtoB) on post-swap1 state
             const swap2 = simulateConstantProduct({
                 pool: leg.pool,
-                venue: VenueId.PumpSwap,
+                venue,
                 direction: ourDir2,
                 inputAmount: swap1.outputAmount,
                 poolState: swap1.newPoolState,
             });
             if (!swap2.success || swap2.outputAmount === 0n) continue;
 
-            // Profit = what we get back - what we put in (same denomination)
+            // Profit = SOL out - SOL in (both in lamports, same denomination)
             const grossProfit = swap2.outputAmount - candidateInput;
             if (grossProfit > bestProfit) {
                 bestProfit = grossProfit;
@@ -315,7 +435,7 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         if (bestProfit <= 0n) return;
 
-        // Net profit after gas + tip
+        // Net profit after gas + tip (all in SOL lamports)
         const netProfit = bestProfit - gasCostLamports - config.tipLamports;
         if (netProfit < config.minProfitLamports) return;
 
@@ -336,7 +456,7 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         const swap2Params: SwapParams = {
             direction: ourDir2,
-            inputAmount: bestSwap1Out, // expected output from swap1
+            inputAmount: bestSwap1Out,
             minOutput: minOut2,
             pool: enrichedPool,
         };
@@ -362,6 +482,20 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         stats.bundlesBuilt++;
 
+        if (config.dryRun) {
+            // Dry-run: log opportunity details without submitting
+            stats.bundlesSubmitted++;
+            stats.totalProfitLamports += netProfit;
+            console.log(
+                `[backrun:dry] venue=${venue === VenueId.PumpSwap ? 'PumpSwap' : 'RaydiumV4'} ` +
+                `profit=${(Number(netProfit) / 1e9).toFixed(6)}SOL ` +
+                `input=${(Number(bestInput) / 1e9).toFixed(3)}SOL ` +
+                `swap1out=${bestSwap1Out} swap2out=${bestSwap2Out} ` +
+                `latency=${result.buildLatencyUs.toFixed(0)}us`,
+            );
+            return;
+        }
+
         // Fire-and-forget submission
         config.jitoClient.submitWithRetry(result.bundle).then(submitResult => {
             if (submitResult.submitted) {
@@ -370,8 +504,9 @@ export function createBackrunEngine(config: BackrunConfig) {
                 if (process.env.DEBUG) {
                     console.log(
                         `[backrun] SUBMITTED bundle=${submitResult.bundleId} ` +
-                        `profit=${Number(netProfit) / 1e9} SOL ` +
-                        `input=${Number(bestInput) / 1e9} SOL ` +
+                        `venue=${venue === VenueId.PumpSwap ? 'PS' : 'RV4'} ` +
+                        `profit=${(Number(netProfit) / 1e9).toFixed(6)}SOL ` +
+                        `input=${(Number(bestInput) / 1e9).toFixed(3)}SOL ` +
                         `latency=${result.buildLatencyUs.toFixed(0)}us`,
                     );
                 }
