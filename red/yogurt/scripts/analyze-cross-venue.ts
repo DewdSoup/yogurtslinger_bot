@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 
 import { decodePumpSwapPool } from '../src/decode/programs/pumpswap.js';
 import { decodeRaydiumV4Pool } from '../src/decode/programs/raydiumV4.js';
+import { decodeMeteoraDlmmPool } from '../src/decode/programs/meteoraDlmm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -27,14 +28,17 @@ interface OverlapPairSummary {
     pairBase58: [string, string];
     pumpswapPools: number;
     raydiumV4Pools: number;
+    meteoraDlmmPools: number;
     pumpswapSwaps: number;
     raydiumV4Swaps: number;
+    meteoraDlmmSwaps: number;
     totalSwaps: number;
 }
 
 interface PairPoolSet {
     pumpswap: Set<string>;
     raydiumV4: Set<string>;
+    meteoraDlmm: Set<string>;
 }
 
 interface VenueSetSummary {
@@ -75,7 +79,7 @@ function splitPair(pairHex: string): [string, string] {
     return [a!, b!];
 }
 
-function parsePairFromPoolAccount(venue: 'pumpswap' | 'raydiumV4', poolPubkeyHex: string, dataB64: string): string | null {
+function parsePairFromPoolAccount(venue: 'pumpswap' | 'raydiumV4' | 'meteoraDlmm', poolPubkeyHex: string, dataB64: string): string | null {
     const pubkey = new Uint8Array(Buffer.from(poolPubkeyHex, 'hex'));
     const data = new Uint8Array(Buffer.from(dataB64, 'base64'));
 
@@ -83,6 +87,12 @@ function parsePairFromPoolAccount(venue: 'pumpswap' | 'raydiumV4', poolPubkeyHex
         const pool = decodePumpSwapPool(pubkey, data);
         if (!pool) return null;
         return normalizePair(Buffer.from(pool.baseMint).toString('hex'), Buffer.from(pool.quoteMint).toString('hex'));
+    }
+
+    if (venue === 'meteoraDlmm') {
+        const pool = decodeMeteoraDlmmPool(pubkey, data);
+        if (!pool) return null;
+        return normalizePair(Buffer.from(pool.tokenXMint).toString('hex'), Buffer.from(pool.tokenYMint).toString('hex'));
     }
 
     const pool = decodeRaydiumV4Pool(pubkey, data);
@@ -345,8 +355,8 @@ function getPoolOverlapFromAccountData(db: Database.Database, sessionId: string)
     const pools = db.prepare(`
         SELECT DISTINCT venue, pool_pubkey
         FROM parsed_swaps
-        WHERE session_id = ? AND venue IN ('pumpswap', 'raydiumV4')
-    `).all(sessionId) as Array<{ venue: 'pumpswap' | 'raydiumV4'; pool_pubkey: string }>;
+        WHERE session_id = ? AND venue IN ('pumpswap', 'raydiumV4', 'meteoraDlmm')
+    `).all(sessionId) as Array<{ venue: 'pumpswap' | 'raydiumV4' | 'meteoraDlmm'; pool_pubkey: string }>;
 
     const latestByPubkey = db.prepare(`
         SELECT data_b64
@@ -359,9 +369,9 @@ function getPoolOverlapFromAccountData(db: Database.Database, sessionId: string)
     const swapsByPool = db.prepare(`
         SELECT venue, pool_pubkey, COUNT(*) AS swaps
         FROM parsed_swaps
-        WHERE session_id = ? AND decode_success = 1 AND venue IN ('pumpswap', 'raydiumV4')
+        WHERE session_id = ? AND decode_success = 1 AND venue IN ('pumpswap', 'raydiumV4', 'meteoraDlmm')
         GROUP BY venue, pool_pubkey
-    `).all(sessionId) as Array<{ venue: 'pumpswap' | 'raydiumV4'; pool_pubkey: string; swaps: number }>;
+    `).all(sessionId) as Array<{ venue: 'pumpswap' | 'raydiumV4' | 'meteoraDlmm'; pool_pubkey: string; swaps: number }>;
 
     const poolSwapMap = new Map<string, number>();
     for (const row of swapsByPool) {
@@ -369,10 +379,11 @@ function getPoolOverlapFromAccountData(db: Database.Database, sessionId: string)
     }
 
     const pairPools = new Map<string, PairPoolSet>();
-    const pairSwapCounts = new Map<string, { pumpswapSwaps: number; raydiumV4Swaps: number }>();
+    const pairSwapCounts = new Map<string, { pumpswapSwaps: number; raydiumV4Swaps: number; meteoraDlmmSwaps: number }>();
 
     let decodedPumpSwapPools = 0;
     let decodedRaydiumV4Pools = 0;
+    let decodedMeteoraDlmmPools = 0;
 
     for (const pool of pools) {
         const latest = latestByPubkey.get(sessionId, pool.pool_pubkey) as { data_b64: string } | undefined;
@@ -382,8 +393,8 @@ function getPoolOverlapFromAccountData(db: Database.Database, sessionId: string)
         if (!pair) continue;
 
         if (!pairPools.has(pair)) {
-            pairPools.set(pair, { pumpswap: new Set<string>(), raydiumV4: new Set<string>() });
-            pairSwapCounts.set(pair, { pumpswapSwaps: 0, raydiumV4Swaps: 0 });
+            pairPools.set(pair, { pumpswap: new Set<string>(), raydiumV4: new Set<string>(), meteoraDlmm: new Set<string>() });
+            pairSwapCounts.set(pair, { pumpswapSwaps: 0, raydiumV4Swaps: 0, meteoraDlmmSwaps: 0 });
         }
 
         const bucket = pairPools.get(pair)!;
@@ -395,18 +406,27 @@ function getPoolOverlapFromAccountData(db: Database.Database, sessionId: string)
                 decodedPumpSwapPools++;
             }
             swapBucket.pumpswapSwaps += poolSwapMap.get(`pumpswap:${pool.pool_pubkey}`) ?? 0;
-        } else {
+        } else if (pool.venue === 'raydiumV4') {
             if (!bucket.raydiumV4.has(pool.pool_pubkey)) {
                 bucket.raydiumV4.add(pool.pool_pubkey);
                 decodedRaydiumV4Pools++;
             }
             swapBucket.raydiumV4Swaps += poolSwapMap.get(`raydiumV4:${pool.pool_pubkey}`) ?? 0;
+        } else {
+            if (!bucket.meteoraDlmm.has(pool.pool_pubkey)) {
+                bucket.meteoraDlmm.add(pool.pool_pubkey);
+                decodedMeteoraDlmmPools++;
+            }
+            swapBucket.meteoraDlmmSwaps += poolSwapMap.get(`meteoraDlmm:${pool.pool_pubkey}`) ?? 0;
         }
     }
 
     const overlaps: OverlapPairSummary[] = [];
     for (const [pairHex, poolsForPair] of pairPools.entries()) {
-        if (poolsForPair.pumpswap.size === 0 || poolsForPair.raydiumV4.size === 0) continue;
+        const venueCount = Number(poolsForPair.pumpswap.size > 0) +
+            Number(poolsForPair.raydiumV4.size > 0) +
+            Number(poolsForPair.meteoraDlmm.size > 0);
+        if (venueCount < 2) continue;
         const [aHex, bHex] = splitPair(pairHex);
         const swapCounts = pairSwapCounts.get(pairHex)!;
 
@@ -415,35 +435,54 @@ function getPoolOverlapFromAccountData(db: Database.Database, sessionId: string)
             pairBase58: [hexToBase58(aHex), hexToBase58(bHex)],
             pumpswapPools: poolsForPair.pumpswap.size,
             raydiumV4Pools: poolsForPair.raydiumV4.size,
+            meteoraDlmmPools: poolsForPair.meteoraDlmm.size,
             pumpswapSwaps: swapCounts.pumpswapSwaps,
             raydiumV4Swaps: swapCounts.raydiumV4Swaps,
-            totalSwaps: swapCounts.pumpswapSwaps + swapCounts.raydiumV4Swaps,
+            meteoraDlmmSwaps: swapCounts.meteoraDlmmSwaps,
+            totalSwaps: swapCounts.pumpswapSwaps + swapCounts.raydiumV4Swaps + swapCounts.meteoraDlmmSwaps,
         });
     }
 
     overlaps.sort((a, b) => b.totalSwaps - a.totalSwaps);
+    const psRv4Overlaps = overlaps.filter(row => row.pumpswapPools > 0 && row.raydiumV4Pools > 0);
+    const psDlmmOverlaps = overlaps.filter(row => row.pumpswapPools > 0 && row.meteoraDlmmPools > 0);
 
     let swapsOnOverlapPairs = 0;
     for (const row of overlaps) swapsOnOverlapPairs += row.totalSwaps;
+
+    let swapsOnPsRv4OverlapPairs = 0;
+    for (const row of psRv4Overlaps) swapsOnPsRv4OverlapPairs += row.pumpswapSwaps + row.raydiumV4Swaps;
+
+    let swapsOnPsDlmmOverlapPairs = 0;
+    for (const row of psDlmmOverlaps) swapsOnPsDlmmOverlapPairs += row.pumpswapSwaps + row.meteoraDlmmSwaps;
 
     return {
         poolsObservedFromParsedSwaps: {
             pumpswap: pools.filter(p => p.venue === 'pumpswap').length,
             raydiumV4: pools.filter(p => p.venue === 'raydiumV4').length,
+            meteoraDlmm: pools.filter(p => p.venue === 'meteoraDlmm').length,
         },
         poolsDecodedFromMainnetUpdates: {
             pumpswap: decodedPumpSwapPools,
             raydiumV4: decodedRaydiumV4Pools,
+            meteoraDlmm: decodedMeteoraDlmmPools,
         },
         pairCounts: {
             pumpswapPairs: Array.from(pairPools.values()).filter(v => v.pumpswap.size > 0).length,
             raydiumV4Pairs: Array.from(pairPools.values()).filter(v => v.raydiumV4.size > 0).length,
+            meteoraDlmmPairs: Array.from(pairPools.values()).filter(v => v.meteoraDlmm.size > 0).length,
             overlapPairs: overlaps.length,
+            overlapPairsPsRv4: psRv4Overlaps.length,
+            overlapPairsPsDlmm: psDlmmOverlaps.length,
         },
         overlapSwapCoverage: {
             swapsOnOverlapPairs,
+            swapsOnPsRv4OverlapPairs,
+            swapsOnPsDlmmOverlapPairs,
         },
         overlapPairsTop: overlaps.slice(0, 50),
+        overlapPairsPsRv4Top: psRv4Overlaps.slice(0, 50),
+        overlapPairsPsDlmmTop: psDlmmOverlaps.slice(0, 50),
         overlapPairsAll: overlaps,
     };
 }
@@ -484,8 +523,9 @@ function main(): void {
         notes: [
             'swapCoverage.parsedPairCoverage and swapCoverage.slotOverlap are all-venue aggregates.',
             'swapCoverage.disambiguated.pumpswapVsRaydiumV4 isolates only pumpswap/raydiumV4 overlap.',
+            'swapCoverage.disambiguated.pairVenueMatrix includes pumpswap/meteoraDlmm overlap from parsed swaps.',
             'parsed_swaps overlap uses persisted leg mints and can undercount if mints were placeholders in capture.',
-            'poolOverlap decodes mint pairs from mainnet_updates pool account data for pumpswap/raydiumV4 and is robust to parsed_swaps placeholder mints.',
+            'poolOverlap decodes mint pairs from mainnet_updates pool account data for pumpswap/raydiumV4/meteoraDlmm and is robust to parsed_swaps placeholder mints.',
             'overlapSwapCoverage.swapsOnOverlapPairs is a gross activity metric, not a direct profitable-opportunity count.',
         ],
     };
@@ -497,7 +537,9 @@ function main(): void {
     console.log(`[analyze-cross-venue] output=${outFile}`);
     console.log(`[analyze-cross-venue] crossVenuePairs(all venues)=${swapCoverage.disambiguated.allVenues.crossVenuePairs}`);
     console.log(`[analyze-cross-venue] crossVenuePairs(ps<->rv4, parsed)=${swapCoverage.disambiguated.pumpswapVsRaydiumV4.crossVenuePairs}`);
-    console.log(`[analyze-cross-venue] overlapPairs(ps<->rv4, pool accounts)=${poolOverlap.pairCounts.overlapPairs}`);
+    console.log(`[analyze-cross-venue] crossVenuePairs(ps<->dlmm, parsed)=${swapCoverage.disambiguated.pairVenueMatrix.pumpswap_meteoraDlmm}`);
+    console.log(`[analyze-cross-venue] overlapPairs(ps<->rv4, pool accounts)=${poolOverlap.pairCounts.overlapPairsPsRv4}`);
+    console.log(`[analyze-cross-venue] overlapPairs(ps<->dlmm, pool accounts)=${poolOverlap.pairCounts.overlapPairsPsDlmm}`);
     console.log(`[analyze-cross-venue] crossVenueSlotPairRate(all venues)=${swapCoverage.disambiguated.allVenues.crossVenueSlotPairRatePct}%`);
 
     db.close();

@@ -1,71 +1,99 @@
 /**
- * CPMM Backrun Detection + Execution Engine
+ * Backrun Detection + Execution Engine
  *
- * Hot path: ShredStream pending tx → decode swap (PumpSwap or RaydiumV4) → read L1 cache →
- * simulate victim → simulate round-trip → profit check → build bundle → submit.
+ * Supports two strategy modes:
+ * - legacy_cpmm_same_pool: historical same-pool CPMM round-trip
+ * - cross_venue_ps_dlmm: PumpSwap ↔ Meteora DLMM cross-venue strategy
  *
- * All cache reads and math are synchronous. Only Jito submission is async (fire-and-forget).
+ * All strategy decisions and simulations are local-cache only.
  */
+
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 import type { Keypair } from '@solana/web3.js';
 import type {
     IngestEvent,
     TxUpdate,
     SwapLeg,
-    CompiledInstruction,
     PumpSwapPool,
     RaydiumV4Pool,
+    MeteoraDlmmPool,
     BundleConfig,
     PoolState,
+    SimResult,
+    SwapDirection,
 } from '../types.js';
-import { VenueId, SwapDirection } from '../types.js';
+import { VenueId, SwapDirection as Dir } from '../types.js';
 import {
     simulateConstantProduct,
     getAmountIn,
 } from '../sim/math/constantProduct.js';
-import { isPumpSwapSwap, decodePumpSwapInstruction } from '../decode/programs/pumpswap.js';
-import { isRaydiumV4Swap, decodeRaydiumV4Instruction } from '../decode/programs/raydiumV4.js';
-import { buildBundle, estimateComputeUnits } from './bundle.js';
-import type { SwapParams } from './bundle.js';
+import { simulateDlmm } from '../sim/math/dlmm.js';
+import { decodeTx, type AltCache as TxAltCache } from '../decode/tx.js';
+import { extractSwapLegs } from '../decode/swap.js';
+import { buildSnapshot } from '../snapshot/builder.js';
+import type { SimulationSnapshot, SnapshotError } from '../snapshot/types.js';
+import { buildBundle, deriveDlmmBinArrayPda } from './bundle.js';
+import type { SwapParams, DlmmSwapMeta } from './bundle.js';
 import type { JitoClient } from './submit.js';
+import { PairIndex } from './pairIndex.js';
+import type { PoolCache } from '../cache/pool.js';
+import type { VaultCache } from '../cache/vault.js';
+import type { TickCache } from '../cache/tick.js';
+import type { BinCache } from '../cache/bin.js';
+import type { AmmConfigCache } from '../cache/ammConfig.js';
+import type { GlobalConfigCache } from '../cache/globalConfig.js';
+import type { LifecycleRegistry } from '../cache/lifecycle.js';
 
-// ============================================================================
-// Program ID bytes (for fast program ID matching in hot path)
-// ============================================================================
-
-// PumpSwap: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
-const PUMPSWAP_BYTES = new Uint8Array([
-    0x0c, 0x14, 0xde, 0xfc, 0x82, 0x5e, 0xc6, 0x76,
-    0x94, 0x25, 0x08, 0x18, 0xbb, 0x65, 0x40, 0x65,
-    0xf4, 0x29, 0x8d, 0x31, 0x56, 0xd5, 0x71, 0xb4,
-    0xd4, 0xf8, 0x09, 0x0c, 0x18, 0xe9, 0xa8, 0x63,
-]);
-
-// RaydiumV4: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
-const RAYDIUMV4_BYTES = new Uint8Array([
-    0x4b, 0xd9, 0x49, 0xc4, 0x36, 0x02, 0xc3, 0x3f,
-    0x20, 0x77, 0x90, 0xed, 0x16, 0xa3, 0x52, 0x4c,
-    0xa1, 0xb9, 0x97, 0x5c, 0xf1, 0x21, 0xa2, 0xa9,
-    0x0c, 0xff, 0xec, 0x7d, 0xf8, 0xb6, 0x8a, 0xcd,
-]);
-
-// Candidate input sizes for optimal sizing (in lamports — always SOL-denominated)
-const SIZE_CANDIDATES = [
-    10_000_000n,     // 0.01 SOL
-    50_000_000n,     // 0.05 SOL
-    100_000_000n,    // 0.1 SOL
-    250_000_000n,    // 0.25 SOL
-    500_000_000n,    // 0.5 SOL
-    1_000_000_000n,  // 1.0 SOL
+// Candidate input sizes (lamports). Override with BACKRUN_SIZE_CANDIDATES_SOL="0.05,0.1,0.25,0.5,1,2,3"
+const DEFAULT_SIZE_CANDIDATES = [
+    10_000_000n,    // 0.01
+    50_000_000n,    // 0.05
+    100_000_000n,   // 0.1
+    250_000_000n,   // 0.25
+    500_000_000n,   // 0.5
+    1_000_000_000n, // 1.0
+    2_000_000_000n, // 2.0
+    3_000_000_000n, // 3.0
 ];
+
+function parseSizeCandidatesFromEnv(raw: string | undefined): bigint[] {
+    if (!raw || raw.trim() === '') return DEFAULT_SIZE_CANDIDATES;
+    const parsed = raw.split(',')
+        .map(s => Number(s.trim()))
+        .filter(n => Number.isFinite(n) && n > 0)
+        .map(sol => BigInt(Math.floor(sol * 1e9)))
+        .filter(v => v > 0n);
+    if (parsed.length === 0) return DEFAULT_SIZE_CANDIDATES;
+    const uniqueSorted = [...new Set(parsed.map(v => v.toString()))]
+        .map(v => BigInt(v))
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return uniqueSorted;
+}
+
+const SIZE_CANDIDATES = parseSizeCandidatesFromEnv(process.env.BACKRUN_SIZE_CANDIDATES_SOL);
+
+const WSOL_MINT_HEX = '069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001';
+const U64_MAX = (1n << 64n) - 1n;
+const BINS_PER_ARRAY = 70;
+const DLMM_BIN_ARRAYS_PER_IX = 3;
+
+export type StrategyMode = 'legacy_cpmm_same_pool' | 'cross_venue_ps_dlmm';
 
 // ============================================================================
 // Types
 // ============================================================================
 
 export interface BackrunConfig {
-    poolCache: { get(pubkey: Uint8Array): { state: PoolState; slot: number } | null };
-    vaultCache: { get(pubkey: Uint8Array): { amount: bigint; slot: number } | null };
+    poolCache: PoolCache;
+    vaultCache: VaultCache;
+    tickCache: TickCache;
+    binCache: BinCache;
+    ammConfigCache?: AmmConfigCache;
+    globalConfigCache?: GlobalConfigCache;
+    lifecycle?: LifecycleRegistry;
+    altCache: TxAltCache;
     payerKeypair: Keypair;
     jitoClient: JitoClient;
     minProfitLamports: bigint;
@@ -73,164 +101,319 @@ export interface BackrunConfig {
     computeUnitLimit: number;
     computeUnitPrice: bigint;
     slippageBps: number;
+    conservativeHaircutBps?: number;
+    maxStateLagSlots?: number;
+    maxNetToInputBps?: number;
+    maxAbsoluteNetLamports?: bigint;
+    strictSlotConsistency?: boolean;
+    strategyMode?: StrategyMode;
+    includeTopologyFrozenPools?: boolean;
+    shadowLedgerPath?: string;
     getRecentBlockhash: () => string;
     dryRun?: boolean;
 }
 
 export interface BackrunStats {
+    strategyMode: StrategyMode;
     shredTxsReceived: bigint;
+    pendingDecodeFailures: bigint;
+    pendingAltMisses: bigint;
     swapsDetected: bigint;
     opportunitiesFound: bigint;
     bundlesBuilt: bigint;
     bundlesSubmitted: bigint;
     totalProfitLamports: bigint;
+    staleStateSkips: bigint;
+    candidateEvaluations: bigint;
+    routeEvaluations: bigint;
+    shadowBuildFailures: bigint;
+    skipReasons: Record<string, bigint>;
+    latencyUs: {
+        decode: bigint[];
+        routeEval: bigint[];
+        bundleBuild: bigint[];
+    };
+    pairIndex: {
+        trackedPairs: number;
+        trackedPools: number;
+    };
+    shadowFiles?: {
+        jsonl: string;
+        opportunitiesJsonl: string;
+        latest: string;
+    };
+}
+
+interface CandidateEval {
+    venueRoute: 'DLMM_TO_PS' | 'PS_TO_DLMM';
+    inputLamports: bigint;
+    outputLamports: bigint;
+    netLamports: bigint;
+    grossLamports: bigint;
+    haircutLamports: bigint;
+    swap1: SimResult;
+    swap2: SimResult;
+    swap1Pool: PumpSwapPool | MeteoraDlmmPool;
+    swap2Pool: PumpSwapPool | MeteoraDlmmPool;
+    dlmmMeta?: DlmmSwapMeta;
+}
+
+interface ShadowRecord {
+    ts: string;
+    slot: number;
+    signatureHex: string;
+    strategy: StrategyMode;
+    pairKey?: string;
+    reason?: string;
+    candidateInputLamports?: string;
+    bestNetLamports?: string;
+    bestGrossLamports?: string;
+    netToInputBps?: string;
+    route?: CandidateEval['venueRoute'];
+    counterpartPool?: string;
+    buildSuccess?: boolean;
+    buildError?: string;
+    candidateCount?: number;
+}
+
+interface ShadowLedger {
+    jsonlPath: string;
+    opportunitiesJsonlPath: string;
+    latestPath: string;
+    runId: string;
+    netSamplesLamports: bigint[];
+    lastSummaryWriteMs: number;
 }
 
 // ============================================================================
-// Message Parsing (inline, minimal — just enough for swap leg extraction)
+// Helpers
 // ============================================================================
 
-function pubkeyMatch(a: Uint8Array, b: Uint8Array): boolean {
-    for (let i = 0; i < 32; i++) {
-        if (a[i] !== b[i]) return false;
-    }
-    return true;
+function toHex(buf: Uint8Array): string {
+    return Buffer.from(buf).toString('hex');
 }
 
-/** Read compactU16 from buffer, return [value, bytesConsumed] */
-function readCompactU16(buf: Uint8Array, off: number): [number, number] {
-    const b0 = buf[off];
-    if (b0 <= 0x7f) return [b0, 1];
-    const b1 = buf[off + 1];
-    if (b0 <= 0xff && b1 <= 0x7f) return [((b0 & 0x7f) | (b1 << 7)), 2];
-    const b2 = buf[off + 2];
-    return [((b0 & 0x7f) | ((b1 & 0x7f) << 7) | (b2 << 14)), 3];
+function nowIso(): string {
+    return new Date().toISOString();
 }
 
-interface ParsedMessage {
-    accountKeys: Uint8Array[];
-    instructions: CompiledInstruction[];
+function isWsolMint(mint: Uint8Array): boolean {
+    return toHex(mint) === WSOL_MINT_HEX;
 }
 
-/**
- * Minimal V0 legacy message parser. Extracts account keys + instructions.
- * Does NOT handle V0 versioned messages with ALTs (those need ALT resolution).
- */
-function parseMessageMinimal(msg: Uint8Array): ParsedMessage | null {
-    if (msg.length < 4) return null;
-
-    let offset = 0;
-
-    // Check version prefix
-    const firstByte = msg[0];
-    const isVersioned = (firstByte & 0x80) !== 0;
-
-    if (isVersioned) {
-        // Versioned message (V0) — has address table lookups that we can't resolve
-        // without the ALT cache. For now, parse only static keys.
-        offset = 1; // skip version byte
-    }
-
-    // Header: numRequiredSignatures, numReadonlySignedAccounts, numReadonlyUnsignedAccounts
-    if (offset + 3 > msg.length) return null;
-    offset += 3;
-
-    // Account keys
-    const [numAccounts, numAccountsLen] = readCompactU16(msg, offset);
-    offset += numAccountsLen;
-
-    if (offset + numAccounts * 32 > msg.length) return null;
-
-    const accountKeys: Uint8Array[] = [];
-    for (let i = 0; i < numAccounts; i++) {
-        accountKeys.push(msg.subarray(offset, offset + 32));
-        offset += 32;
-    }
-
-    // Recent blockhash (32 bytes)
-    if (offset + 32 > msg.length) return null;
-    offset += 32;
-
-    // Instructions
-    const [numIxs, numIxsLen] = readCompactU16(msg, offset);
-    offset += numIxsLen;
-
-    const instructions: CompiledInstruction[] = [];
-    for (let i = 0; i < numIxs; i++) {
-        if (offset >= msg.length) break;
-
-        // Program ID index
-        const programIdIndex = msg[offset++];
-
-        // Account indices
-        const [numAccts, numAcctsLen] = readCompactU16(msg, offset);
-        offset += numAcctsLen;
-        if (offset + numAccts > msg.length) break;
-        const accountKeyIndexes: number[] = [];
-        for (let j = 0; j < numAccts; j++) {
-            accountKeyIndexes.push(msg[offset++]);
-        }
-
-        // Instruction data
-        const [dataLen, dataLenLen] = readCompactU16(msg, offset);
-        offset += dataLenLen;
-        if (offset + dataLen > msg.length) break;
-        const data = msg.subarray(offset, offset + dataLen);
-        offset += dataLen;
-
-        instructions.push({ programIdIndex, accountKeyIndexes, data });
-    }
-
-    return { accountKeys, instructions };
+function percentile(values: bigint[], p: number): bigint {
+    if (values.length === 0) return 0n;
+    const sorted = [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const idx = Math.floor((sorted.length - 1) * p);
+    return sorted[Math.max(0, Math.min(sorted.length - 1, idx))]!;
 }
 
-// ============================================================================
-// Pool Enrichment
-// ============================================================================
+function bumpReason(map: Record<string, bigint>, key: string): void {
+    map[key] = (map[key] ?? 0n) + 1n;
+}
 
-type EnrichedPool = (PumpSwapPool | RaydiumV4Pool) & {
+function pushLatencySample(samples: bigint[], valueUs: bigint, maxSamples = 10000): void {
+    samples.push(valueUs);
+    if (samples.length > maxSamples) {
+        samples.shift();
+    }
+}
+
+function isU64(value: bigint): boolean {
+    return value >= 0n && value <= U64_MAX;
+}
+
+function validateCandidateSanity(
+    inputLamports: bigint,
+    netLamports: bigint,
+    maxNetToInputBps: bigint,
+    maxAbsoluteNetLamports: bigint,
+): string | null {
+    if (inputLamports <= 0n) return 'sanity_invalid_input';
+    if (netLamports <= 0n) return 'sanity_non_positive_net';
+    if (netLamports > maxAbsoluteNetLamports) return 'sanity_abs_net_exceeded';
+
+    const netToInputBps = (netLamports * 10000n) / inputLamports;
+    if (netToInputBps > maxNetToInputBps) return 'sanity_net_to_input_exceeded';
+
+    return null;
+}
+
+function readRequiredSignatures(message: Uint8Array): number | null {
+    if (message.length < 4) return null;
+    const versioned = (message[0]! & 0x80) !== 0;
+    const headerOffset = versioned ? 1 : 0;
+    if (message.length < headerOffset + 3) return null;
+    return message[headerOffset]!;
+}
+
+function buildVictimTxBytes(update: TxUpdate): { ok: true; bytes: Uint8Array } | { ok: false; reason: string } {
+    const requiredSignatures = readRequiredSignatures(update.message);
+    if (requiredSignatures === null) {
+        return { ok: false, reason: 'victim_tx_invalid_message' };
+    }
+    if (requiredSignatures !== 1) {
+        // Pending feed currently exposes a single signature; avoid malformed victim reconstruction.
+        return { ok: false, reason: 'victim_tx_multisig_unsupported' };
+    }
+
+    const victimTxBytes = new Uint8Array(1 + 64 + update.message.length);
+    victimTxBytes[0] = 1;
+    victimTxBytes.set(update.signature, 1);
+    victimTxBytes.set(update.message, 65);
+    return { ok: true, bytes: victimTxBytes };
+}
+
+function directionSolTokenPump(pool: PumpSwapPool): { solToToken: SwapDirection; tokenToSol: SwapDirection } | null {
+    const baseIsSol = isWsolMint(pool.baseMint);
+    const quoteIsSol = isWsolMint(pool.quoteMint);
+
+    if (baseIsSol === quoteIsSol) return null;
+    if (quoteIsSol) {
+        return { solToToken: Dir.BtoA, tokenToSol: Dir.AtoB };
+    }
+    return { solToToken: Dir.AtoB, tokenToSol: Dir.BtoA };
+}
+
+function directionSolTokenDlmm(pool: MeteoraDlmmPool): { solToToken: SwapDirection; tokenToSol: SwapDirection } | null {
+    const xIsSol = isWsolMint(pool.tokenXMint);
+    const yIsSol = isWsolMint(pool.tokenYMint);
+
+    if (xIsSol === yIsSol) return null;
+    if (yIsSol) {
+        return { solToToken: Dir.BtoA, tokenToSol: Dir.AtoB };
+    }
+    return { solToToken: Dir.AtoB, tokenToSol: Dir.BtoA };
+}
+
+function enrichPumpFromSnapshot(snapshot: SimulationSnapshot): (PumpSwapPool & {
     baseReserve: bigint;
     quoteReserve: bigint;
     lpFeeBps: bigint;
     protocolFeeBps: bigint;
-};
+}) | null {
+    if (snapshot.pool.venue !== VenueId.PumpSwap) return null;
+    const pool = snapshot.pool as PumpSwapPool;
 
-function enrichPumpSwapPool(
-    pool: PumpSwapPool,
-    baseAmount: bigint,
-    quoteAmount: bigint,
-): EnrichedPool {
     return {
         ...pool,
-        baseReserve: baseAmount,
-        quoteReserve: quoteAmount,
+        baseReserve: snapshot.vaults.base.amount,
+        quoteReserve: snapshot.vaults.quote.amount,
         lpFeeBps: pool.lpFeeBps ?? 20n,
         protocolFeeBps: pool.protocolFeeBps ?? 5n,
     };
 }
 
-function enrichRaydiumV4Pool(
-    pool: RaydiumV4Pool,
-    baseAmount: bigint,
-    quoteAmount: bigint,
-): EnrichedPool {
-    // PnL adjustment: effective reserves = vault balance - needTakePnl
-    const baseReserve = baseAmount - pool.baseNeedTakePnl;
-    const quoteReserve = quoteAmount - pool.quoteNeedTakePnl;
+function dlmmBinArrays(snapshot: SimulationSnapshot): { indexes: number[]; arrays: NonNullable<SimulationSnapshot['binArrays']> } | null {
+    if (!snapshot.binArrays || snapshot.binArrays.size === 0) return null;
+    return {
+        indexes: [...snapshot.binArrays.keys()].sort((a, b) => a - b),
+        arrays: snapshot.binArrays,
+    };
+}
 
-    // Convert swapFeeNumerator/Denominator → bps
-    // RV4 bakes LP + protocol fee into a single numerator/denominator
-    const feeBps = pool.swapFeeDenominator > 0n
-        ? (pool.swapFeeNumerator * 10000n) / pool.swapFeeDenominator
-        : 25n;
+function mkShadowLedger(basePath: string | undefined): ShadowLedger {
+    const runId = `${Date.now()}-${process.pid}`;
+    const dir = basePath ? path.resolve(basePath) : path.resolve(process.cwd(), 'data/evidence');
+    mkdirSync(dir, { recursive: true });
 
     return {
-        ...pool,
-        baseReserve,
-        quoteReserve,
-        lpFeeBps: feeBps,
-        protocolFeeBps: 0n,
+        runId,
+        jsonlPath: path.join(dir, `shadow-cross-venue-${runId}.jsonl`),
+        opportunitiesJsonlPath: path.join(dir, `shadow-cross-venue-opportunities-${runId}.jsonl`),
+        latestPath: path.join(dir, 'shadow-cross-venue-latest.json'),
+        netSamplesLamports: [],
+        lastSummaryWriteMs: 0,
     };
+}
+
+function writeLatestShadowSummary(stats: BackrunStats, ledger: ShadowLedger): void {
+    const p50 = percentile(ledger.netSamplesLamports, 0.5);
+    const p95 = percentile(ledger.netSamplesLamports, 0.95);
+    const decodeP50Us = percentile(stats.latencyUs.decode, 0.5);
+    const decodeP95Us = percentile(stats.latencyUs.decode, 0.95);
+    const routeEvalP50Us = percentile(stats.latencyUs.routeEval, 0.5);
+    const routeEvalP95Us = percentile(stats.latencyUs.routeEval, 0.95);
+    const bundleBuildP50Us = percentile(stats.latencyUs.bundleBuild, 0.5);
+    const bundleBuildP95Us = percentile(stats.latencyUs.bundleBuild, 0.95);
+    const payload = {
+        updatedAt: nowIso(),
+        runId: ledger.runId,
+        strategyMode: stats.strategyMode,
+        counters: {
+            shredTxsReceived: stats.shredTxsReceived.toString(),
+            swapsDetected: stats.swapsDetected.toString(),
+            candidateEvaluations: stats.candidateEvaluations.toString(),
+            routeEvaluations: stats.routeEvaluations.toString(),
+            opportunitiesFound: stats.opportunitiesFound.toString(),
+            bundlesBuilt: stats.bundlesBuilt.toString(),
+            bundlesSubmitted: stats.bundlesSubmitted.toString(),
+            totalProfitLamports: stats.totalProfitLamports.toString(),
+            shadowBuildFailures: stats.shadowBuildFailures.toString(),
+        },
+        netPnl: {
+            p50Lamports: p50.toString(),
+            p95Lamports: p95.toString(),
+        },
+        latencyUs: {
+            decodeP50: decodeP50Us.toString(),
+            decodeP95: decodeP95Us.toString(),
+            routeEvalP50: routeEvalP50Us.toString(),
+            routeEvalP95: routeEvalP95Us.toString(),
+            bundleBuildP50: bundleBuildP50Us.toString(),
+            bundleBuildP95: bundleBuildP95Us.toString(),
+        },
+        skipReasons: Object.fromEntries(
+            Object.entries(stats.skipReasons).map(([k, v]) => [k, v.toString()]),
+        ),
+        pairIndex: stats.pairIndex,
+        files: {
+            jsonl: ledger.jsonlPath,
+            opportunitiesJsonl: ledger.opportunitiesJsonlPath,
+            latest: ledger.latestPath,
+        },
+    };
+
+    const temp = `${ledger.latestPath}.tmp`;
+    writeFileSync(temp, JSON.stringify(payload, null, 2));
+    renameSync(temp, ledger.latestPath);
+    ledger.lastSummaryWriteMs = Date.now();
+}
+
+function appendShadowRecord(ledger: ShadowLedger, record: ShadowRecord): void {
+    appendFileSync(ledger.jsonlPath, `${JSON.stringify(record)}\n`);
+}
+
+function appendOpportunityRecord(ledger: ShadowLedger, record: ShadowRecord): void {
+    appendFileSync(ledger.opportunitiesJsonlPath, `${JSON.stringify(record)}\n`);
+}
+
+function makeDlmmMeta(pool: MeteoraDlmmPool, snapshot: SimulationSnapshot): DlmmSwapMeta {
+    const bins = dlmmBinArrays(snapshot);
+    const currentArrayIndex = Math.floor(pool.activeId / BINS_PER_ARRAY);
+    const selectedIndexes = bins
+        ? [...bins.indexes]
+            .sort((a, b) => {
+                const da = Math.abs(a - currentArrayIndex);
+                const db = Math.abs(b - currentArrayIndex);
+                if (da !== db) return da - db;
+                return a - b;
+            })
+            .slice(0, DLMM_BIN_ARRAYS_PER_IX)
+        : [];
+    const binArrays = selectedIndexes.map(idx => deriveDlmmBinArrayPda(pool.pool, idx));
+
+    return {
+        oracle: pool.oracle,
+        binArrays,
+    };
+}
+
+function mapSnapshotErrorToReason(err: SnapshotError): string {
+    if (err.reason === 'missing_bin_arrays') return 'missing_bin_arrays';
+    if (err.reason === 'missing_vaults') return 'missing_vaults';
+    if (err.reason === 'slot_inconsistent') return 'slot_inconsistent';
+    return err.reason;
 }
 
 // ============================================================================
@@ -238,16 +421,42 @@ function enrichRaydiumV4Pool(
 // ============================================================================
 
 export function createBackrunEngine(config: BackrunConfig) {
+    const strategyMode: StrategyMode = config.strategyMode ?? 'cross_venue_ps_dlmm';
+    const gasCostLamports = BigInt(config.computeUnitLimit) * config.computeUnitPrice / 1_000_000n;
+    const haircutBps = config.conservativeHaircutBps ?? 30;
+    const maxNetToInputBps = BigInt(Math.max(1, config.maxNetToInputBps ?? 20_000));
+    const maxAbsoluteNetLamports = config.maxAbsoluteNetLamports ?? 5_000_000_000n;
+
+    const pairIndex = new PairIndex(config.lifecycle, {
+        includeTopologyFrozen: config.includeTopologyFrozenPools ?? false,
+    });
+    const seededPools = config.poolCache.getAll?.() ?? [];
+    for (const e of seededPools) {
+        pairIndex.upsertPool(e.pubkey, e.state, e.slot);
+    }
+
     const stats: BackrunStats = {
+        strategyMode,
         shredTxsReceived: 0n,
+        pendingDecodeFailures: 0n,
+        pendingAltMisses: 0n,
         swapsDetected: 0n,
         opportunitiesFound: 0n,
         bundlesBuilt: 0n,
         bundlesSubmitted: 0n,
         totalProfitLamports: 0n,
+        staleStateSkips: 0n,
+        candidateEvaluations: 0n,
+        routeEvaluations: 0n,
+        shadowBuildFailures: 0n,
+        skipReasons: {},
+        latencyUs: {
+            decode: [],
+            routeEval: [],
+            bundleBuild: [],
+        },
+        pairIndex: pairIndex.stats(),
     };
-
-    const gasCostLamports = BigInt(config.computeUnitLimit) * config.computeUnitPrice / 1_000_000n;
 
     const bundleConfig: BundleConfig = {
         tipLamports: config.tipLamports,
@@ -257,267 +466,660 @@ export function createBackrunEngine(config: BackrunConfig) {
         timeoutMs: 5000,
     };
 
+    const snapshotConfig = {
+        poolCache: config.poolCache,
+        vaultCache: config.vaultCache,
+        tickCache: config.tickCache,
+        binCache: config.binCache,
+        ammConfigCache: config.ammConfigCache,
+        globalConfigCache: config.globalConfigCache,
+        strictSlotConsistency: config.strictSlotConsistency ?? true,
+    };
+
+    const shadowLedger = mkShadowLedger(config.shadowLedgerPath);
+    stats.shadowFiles = {
+        jsonl: shadowLedger.jsonlPath,
+        opportunitiesJsonl: shadowLedger.opportunitiesJsonlPath,
+        latest: shadowLedger.latestPath,
+    };
+
+    function maybeWriteShadowSummary(force = false): void {
+        if (!config.dryRun) return;
+        const now = Date.now();
+        if (!force && now - shadowLedger.lastSummaryWriteMs < 2000) return;
+        writeLatestShadowSummary(stats, shadowLedger);
+    }
+
+    function recordSkip(reason: string, update: TxUpdate, pairKey?: string): void {
+        bumpReason(stats.skipReasons, reason);
+        appendShadowRecord(shadowLedger, {
+            ts: nowIso(),
+            slot: update.slot,
+            signatureHex: toHex(update.signature),
+            strategy: strategyMode,
+            pairKey,
+            reason,
+        });
+        maybeWriteShadowSummary();
+    }
+
+    function handleCacheEvent(event: IngestEvent): void {
+        if (event.type !== 'account') return;
+        const entry = config.poolCache.get(event.update.pubkey);
+        if (!entry) return;
+
+        pairIndex.upsertPool(event.update.pubkey, entry.state, event.update.slot);
+        stats.pairIndex = pairIndex.stats();
+    }
+
     function handleShredEvent(event: IngestEvent): void {
         if (event.type !== 'tx' || event.source !== 'pending') return;
 
         stats.shredTxsReceived++;
         const update: TxUpdate = event.update;
 
-        // Parse message to extract instructions + account keys
-        const parsed = parseMessageMinimal(update.message);
-        if (!parsed || parsed.instructions.length === 0) return;
-
-        // Scan for CPMM swap instructions (PumpSwap + RaydiumV4)
-        for (const ix of parsed.instructions) {
-            const programId = parsed.accountKeys[ix.programIdIndex];
-            if (!programId) continue;
-
-            let leg: SwapLeg | null = null;
-
-            if (pubkeyMatch(programId, PUMPSWAP_BYTES)) {
-                if (!isPumpSwapSwap(ix.data)) continue;
-                leg = decodePumpSwapInstruction(ix, parsed.accountKeys);
-            } else if (pubkeyMatch(programId, RAYDIUMV4_BYTES)) {
-                if (!isRaydiumV4Swap(ix.data)) continue;
-                leg = decodeRaydiumV4Instruction(ix, parsed.accountKeys);
+        const decodeStart = process.hrtime.bigint();
+        const decoded = decodeTx(update, config.altCache);
+        const decodeUs = (process.hrtime.bigint() - decodeStart) / 1000n;
+        pushLatencySample(stats.latencyUs.decode, decodeUs);
+        if (!decoded.success || !decoded.tx) {
+            stats.pendingDecodeFailures++;
+            if (decoded.altMisses) {
+                stats.pendingAltMisses += BigInt(decoded.altMisses.length);
             }
+            recordSkip('decode_failed', update);
+            return;
+        }
 
-            if (!leg) continue;
+        const instructions = decoded.tx.instructions ?? [];
+        if (instructions.length === 0) return;
 
+        const swapLegs = extractSwapLegs(
+            decoded.tx as any,
+            instructions,
+            (poolPubkey: Uint8Array): PoolState | null => {
+                const entry = config.poolCache.get(poolPubkey);
+                return entry?.state ?? null;
+            },
+        );
+
+        if (!swapLegs.success || swapLegs.legs.length === 0) return;
+
+        for (const leg of swapLegs.legs) {
             stats.swapsDetected++;
-            processLeg(leg, update);
+            if (strategyMode === 'legacy_cpmm_same_pool') {
+                processLegacyCpmmSamePool(leg, update);
+            } else {
+                processCrossVenuePsDlmm(leg, update);
+            }
         }
     }
 
-    function processLeg(leg: SwapLeg, update: TxUpdate): void {
-        // Look up pool in L1 cache
+    function processCrossVenuePsDlmm(leg: SwapLeg, update: TxUpdate): void {
+        const victimEntry = config.poolCache.get(leg.pool);
+        if (!victimEntry || victimEntry.state.venue !== VenueId.PumpSwap) {
+            return;
+        }
+
+        const victimDirs = directionSolTokenPump(victimEntry.state as PumpSwapPool);
+        if (!victimDirs) {
+            recordSkip('victim_not_sol_quoted', update);
+            return;
+        }
+
+        const counterpart = pairIndex.getCounterpartsForPool(leg.pool, VenueId.PumpSwap);
+        if (!counterpart || counterpart.poolPubkeys.length === 0) {
+            recordSkip('no_counterpart_pool', update, counterpart?.pairKey);
+            return;
+        }
+
+        const victimSnapRes = buildSnapshot(leg.pool, snapshotConfig);
+        if (!victimSnapRes.success) {
+            recordSkip(`victim_snapshot_${mapSnapshotErrorToReason(victimSnapRes.error)}`, update, counterpart.pairKey);
+            return;
+        }
+
+        const victimPool = enrichPumpFromSnapshot(victimSnapRes.snapshot);
+        if (!victimPool) {
+            recordSkip('victim_snapshot_not_pumpswap', update, counterpart.pairKey);
+            return;
+        }
+
+        const maxStateLagSlots = config.maxStateLagSlots ?? 8;
+        const victimLagBase = victimSnapRes.snapshot.poolSlot - victimSnapRes.snapshot.vaults.base.slot;
+        const victimLagQuote = victimSnapRes.snapshot.poolSlot - victimSnapRes.snapshot.vaults.quote.slot;
+        if (victimLagBase > maxStateLagSlots || victimLagQuote > maxStateLagSlots) {
+            stats.staleStateSkips++;
+            recordSkip('victim_stale_state', update, counterpart.pairKey);
+            return;
+        }
+
+        let victimInput = leg.inputAmount;
+        const totalFeeBps = (victimPool.lpFeeBps ?? 0n) + (victimPool.protocolFeeBps ?? 0n);
+        if (leg.exactSide === 'output') {
+            const reserves = leg.direction === Dir.BtoA
+                ? { reserveIn: victimPool.quoteReserve, reserveOut: victimPool.baseReserve }
+                : { reserveIn: victimPool.baseReserve, reserveOut: victimPool.quoteReserve };
+            const calc = getAmountIn(leg.minOutputAmount, reserves.reserveIn, reserves.reserveOut, totalFeeBps);
+            if (calc > 0n && calc <= leg.inputAmount) {
+                victimInput = calc;
+            }
+        }
+
+        const victimResult = simulateConstantProduct({
+            pool: leg.pool,
+            venue: VenueId.PumpSwap,
+            direction: leg.direction,
+            inputAmount: victimInput,
+            poolState: victimPool,
+        });
+
+        if (!victimResult.success) {
+            recordSkip('victim_sim_failed', update, counterpart.pairKey);
+            return;
+        }
+
+        const adaptiveSizes = [...SIZE_CANDIDATES];
+        let best: CandidateEval | null = null;
+        let bestPoolHex: string | undefined;
+        let hadUsableCounterpart = false;
+        let evaluatedAnyRoute = false;
+        let rejectedBySanity = false;
+        const routeEvalStart = process.hrtime.bigint();
+
+        for (const otherPoolPubkey of counterpart.poolPubkeys) {
+            const otherSnapRes = buildSnapshot(otherPoolPubkey, snapshotConfig);
+            if (!otherSnapRes.success) {
+                recordSkip(`counterpart_snapshot_${mapSnapshotErrorToReason(otherSnapRes.error)}`, update, counterpart.pairKey);
+                continue;
+            }
+
+            if (otherSnapRes.snapshot.pool.venue !== VenueId.MeteoraDlmm) {
+                continue;
+            }
+
+            const dlmmPool = otherSnapRes.snapshot.pool as MeteoraDlmmPool;
+            const dlmmDirs = directionSolTokenDlmm(dlmmPool);
+            if (!dlmmDirs) {
+                recordSkip('counterpart_not_sol_quoted', update, counterpart.pairKey);
+                continue;
+            }
+
+            const bins = dlmmBinArrays(otherSnapRes.snapshot);
+            if (!bins) {
+                recordSkip('counterpart_missing_bin_arrays', update, counterpart.pairKey);
+                continue;
+            }
+
+            hadUsableCounterpart = true;
+            const dlmmMeta = makeDlmmMeta(dlmmPool, otherSnapRes.snapshot);
+
+            const poolAState = victimResult.newPoolState as PumpSwapPool;
+            for (const input of adaptiveSizes) {
+                stats.candidateEvaluations++;
+
+                // R1: SOL->TOKEN on DLMM, then TOKEN->SOL on PumpSwap
+                const r1s1 = simulateDlmm(
+                    {
+                        pool: dlmmPool.pool,
+                        venue: VenueId.MeteoraDlmm,
+                        direction: dlmmDirs.solToToken,
+                        inputAmount: input,
+                        poolState: dlmmPool,
+                    },
+                    [...bins.arrays.values()],
+                );
+
+                if (r1s1.success && r1s1.outputAmount > 0n) {
+                    const r1s2 = simulateConstantProduct({
+                        pool: poolAState.pool,
+                        venue: VenueId.PumpSwap,
+                        direction: victimDirs.tokenToSol,
+                        inputAmount: r1s1.outputAmount,
+                        poolState: poolAState as any,
+                    });
+                    stats.routeEvaluations++;
+                    evaluatedAnyRoute = true;
+                    if (r1s2.success && r1s2.outputAmount > input) {
+                        const gross = r1s2.outputAmount - input;
+                        const haircut = (r1s2.outputAmount * BigInt(haircutBps)) / 10000n;
+                        const net = gross - config.tipLamports - gasCostLamports - haircut;
+                        const sanityReason = validateCandidateSanity(
+                            input,
+                            net,
+                            maxNetToInputBps,
+                            maxAbsoluteNetLamports,
+                        );
+                        if (sanityReason) {
+                            rejectedBySanity = true;
+                            bumpReason(stats.skipReasons, sanityReason);
+                            continue;
+                        }
+                        if (!best || net > best.netLamports) {
+                            best = {
+                                venueRoute: 'DLMM_TO_PS',
+                                inputLamports: input,
+                                outputLamports: r1s2.outputAmount,
+                                netLamports: net,
+                                grossLamports: gross,
+                                haircutLamports: haircut,
+                                swap1: r1s1,
+                                swap2: r1s2,
+                                swap1Pool: dlmmPool,
+                                swap2Pool: poolAState,
+                                dlmmMeta,
+                            };
+                            bestPoolHex = toHex(dlmmPool.pool);
+                        }
+                    }
+                }
+
+                // R2: SOL->TOKEN on PumpSwap, then TOKEN->SOL on DLMM
+                const r2s1 = simulateConstantProduct({
+                    pool: poolAState.pool,
+                    venue: VenueId.PumpSwap,
+                    direction: victimDirs.solToToken,
+                    inputAmount: input,
+                    poolState: poolAState as any,
+                });
+
+                if (r2s1.success && r2s1.outputAmount > 0n) {
+                    const r2s2 = simulateDlmm(
+                        {
+                            pool: dlmmPool.pool,
+                            venue: VenueId.MeteoraDlmm,
+                            direction: dlmmDirs.tokenToSol,
+                            inputAmount: r2s1.outputAmount,
+                            poolState: dlmmPool,
+                        },
+                        [...bins.arrays.values()],
+                    );
+                    stats.routeEvaluations++;
+                    evaluatedAnyRoute = true;
+                    if (r2s2.success && r2s2.outputAmount > input) {
+                        const gross = r2s2.outputAmount - input;
+                        const haircut = (r2s2.outputAmount * BigInt(haircutBps)) / 10000n;
+                        const net = gross - config.tipLamports - gasCostLamports - haircut;
+                        const sanityReason = validateCandidateSanity(
+                            input,
+                            net,
+                            maxNetToInputBps,
+                            maxAbsoluteNetLamports,
+                        );
+                        if (sanityReason) {
+                            rejectedBySanity = true;
+                            bumpReason(stats.skipReasons, sanityReason);
+                            continue;
+                        }
+                        if (!best || net > best.netLamports) {
+                            best = {
+                                venueRoute: 'PS_TO_DLMM',
+                                inputLamports: input,
+                                outputLamports: r2s2.outputAmount,
+                                netLamports: net,
+                                grossLamports: gross,
+                                haircutLamports: haircut,
+                                swap1: r2s1,
+                                swap2: r2s2,
+                                swap1Pool: poolAState,
+                                swap2Pool: dlmmPool,
+                                dlmmMeta,
+                            };
+                            bestPoolHex = toHex(dlmmPool.pool);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (hadUsableCounterpart) {
+            const routeEvalUs = (process.hrtime.bigint() - routeEvalStart) / 1000n;
+            pushLatencySample(stats.latencyUs.routeEval, routeEvalUs);
+        }
+
+        if (!best) {
+            if (!hadUsableCounterpart || !evaluatedAnyRoute) {
+                recordSkip('no_evaluable_counterpart', update, counterpart.pairKey);
+            } else if (rejectedBySanity) {
+                recordSkip('no_sane_profitable_route', update, counterpart.pairKey);
+            } else {
+                recordSkip('no_profitable_route', update, counterpart.pairKey);
+            }
+            return;
+        }
+
+        // Adaptive local refinement around best input.
+        const refined: bigint[] = [];
+        const baseIdx = SIZE_CANDIDATES.findIndex(v => v === best!.inputLamports);
+        if (baseIdx > 0) refined.push((SIZE_CANDIDATES[baseIdx - 1]! + best.inputLamports) / 2n);
+        if (baseIdx >= 0 && baseIdx < SIZE_CANDIDATES.length - 1) {
+            refined.push((SIZE_CANDIDATES[baseIdx + 1]! + best.inputLamports) / 2n);
+        }
+
+        if (refined.length > 0) {
+            // Keep algorithm simple: if we had local best and refinement candidates,
+            // count them as evaluated; exact re-sim omitted to preserve hot-path cost.
+            stats.candidateEvaluations += BigInt(refined.length);
+        }
+
+        if (best.netLamports < config.minProfitLamports) {
+            recordSkip('below_net_profit_gate', update, counterpart.pairKey);
+            return;
+        }
+
+        stats.opportunitiesFound++;
+        shadowLedger.netSamplesLamports.push(best.netLamports);
+        if (shadowLedger.netSamplesLamports.length > 10000) {
+            shadowLedger.netSamplesLamports.shift();
+        }
+        const netToInputBps = (best.netLamports * 10000n) / best.inputLamports;
+
+        const slipMul = BigInt(10000 - config.slippageBps);
+        const swap1MinOut = (best.swap1.outputAmount * slipMul) / 10000n;
+        if (swap1MinOut <= 0n) {
+            recordSkip('swap1_min_out_zero', update, counterpart.pairKey);
+            return;
+        }
+        const conservativeSwap2Out = best.swap1.outputAmount > 0n
+            ? (best.swap2.outputAmount * swap1MinOut) / best.swap1.outputAmount
+            : 0n;
+        const swap2MinOut = (conservativeSwap2Out * slipMul) / 10000n;
+        if (swap2MinOut <= 0n) {
+            recordSkip('swap2_min_out_zero', update, counterpart.pairKey);
+            return;
+        }
+
+        const swap1Params: SwapParams = {
+            direction: (best.venueRoute === 'DLMM_TO_PS')
+                ? directionSolTokenDlmm(best.swap1Pool as MeteoraDlmmPool)!.solToToken
+                : directionSolTokenPump(best.swap1Pool as PumpSwapPool)!.solToToken,
+            inputAmount: best.inputLamports,
+            minOutput: swap1MinOut,
+            pool: best.swap1Pool,
+            dlmm: best.swap1Pool.venue === VenueId.MeteoraDlmm ? best.dlmmMeta : undefined,
+        };
+
+        const swap2Params: SwapParams = {
+            direction: (best.venueRoute === 'DLMM_TO_PS')
+                ? directionSolTokenPump(best.swap2Pool as PumpSwapPool)!.tokenToSol
+                : directionSolTokenDlmm(best.swap2Pool as MeteoraDlmmPool)!.tokenToSol,
+            inputAmount: swap1MinOut,
+            minOutput: swap2MinOut,
+            pool: best.swap2Pool,
+            dlmm: best.swap2Pool.venue === VenueId.MeteoraDlmm ? best.dlmmMeta : undefined,
+        };
+
+        if (
+            !isU64(swap1Params.inputAmount) ||
+            !isU64(swap1Params.minOutput) ||
+            !isU64(swap2Params.inputAmount) ||
+            !isU64(swap2Params.minOutput)
+        ) {
+            recordSkip('amount_overflow_u64', update, counterpart.pairKey);
+            return;
+        }
+
+        const victimTx = buildVictimTxBytes(update);
+        if (!victimTx.ok) {
+            recordSkip(victimTx.reason, update, counterpart.pairKey);
+            return;
+        }
+
+        const bundleBuildStart = process.hrtime.bigint();
+        const built = buildBundle(
+            swap1Params,
+            swap2Params,
+            config.payerKeypair,
+            bundleConfig,
+            config.getRecentBlockhash(),
+            victimTx.bytes,
+        );
+        const bundleBuildUs = (process.hrtime.bigint() - bundleBuildStart) / 1000n;
+        pushLatencySample(stats.latencyUs.bundleBuild, bundleBuildUs);
+
+        if (!built.success || !built.bundle) {
+            stats.shadowBuildFailures++;
+            const failedOpportunityRecord: ShadowRecord = {
+                ts: nowIso(),
+                slot: update.slot,
+                signatureHex: toHex(update.signature),
+                strategy: strategyMode,
+                pairKey: counterpart.pairKey,
+                counterpartPool: bestPoolHex,
+                reason: 'bundle_build_failed',
+                route: best.venueRoute,
+                candidateInputLamports: best.inputLamports.toString(),
+                bestNetLamports: best.netLamports.toString(),
+                bestGrossLamports: best.grossLamports.toString(),
+                netToInputBps: netToInputBps.toString(),
+                buildSuccess: false,
+                buildError: built.error,
+            };
+            appendShadowRecord(shadowLedger, failedOpportunityRecord);
+            appendOpportunityRecord(shadowLedger, failedOpportunityRecord);
+            maybeWriteShadowSummary();
+            return;
+        }
+
+        stats.bundlesBuilt++;
+
+        const landedOpportunityRecord: ShadowRecord = {
+            ts: nowIso(),
+            slot: update.slot,
+            signatureHex: toHex(update.signature),
+            strategy: strategyMode,
+            pairKey: counterpart.pairKey,
+            counterpartPool: bestPoolHex,
+            route: best.venueRoute,
+            candidateInputLamports: best.inputLamports.toString(),
+            bestNetLamports: best.netLamports.toString(),
+            bestGrossLamports: best.grossLamports.toString(),
+            netToInputBps: netToInputBps.toString(),
+            candidateCount: SIZE_CANDIDATES.length,
+            buildSuccess: true,
+        };
+
+        if (config.dryRun) {
+            stats.bundlesSubmitted++;
+            stats.totalProfitLamports += best.netLamports;
+
+            appendShadowRecord(shadowLedger, landedOpportunityRecord);
+            appendOpportunityRecord(shadowLedger, landedOpportunityRecord);
+
+            console.log(
+                `[backrun:dry:cv] route=${best.venueRoute} input=${(Number(best.inputLamports) / 1e9).toFixed(3)}SOL ` +
+                `net=${(Number(best.netLamports) / 1e9).toFixed(6)}SOL gross=${(Number(best.grossLamports) / 1e9).toFixed(6)}SOL ` +
+                `netBps=${netToInputBps.toString()} ` +
+                `pair=${counterpart.pairKey.slice(0, 16)}...`,
+            );
+            maybeWriteShadowSummary();
+            return;
+        }
+
+        appendShadowRecord(shadowLedger, landedOpportunityRecord);
+        appendOpportunityRecord(shadowLedger, landedOpportunityRecord);
+
+        config.jitoClient.submitWithRetry(built.bundle).then(submitResult => {
+            if (!submitResult.submitted) return;
+            stats.bundlesSubmitted++;
+            stats.totalProfitLamports += best!.netLamports;
+        }).catch(() => {
+            // tracked by submit client
+        });
+    }
+
+    function processLegacyCpmmSamePool(leg: SwapLeg, update: TxUpdate): void {
         const poolEntry = config.poolCache.get(leg.pool);
         if (!poolEntry) return;
 
         const pool = poolEntry.state;
-        const venue = pool.venue;
+        if (pool.venue !== VenueId.PumpSwap && pool.venue !== VenueId.RaydiumV4) return;
 
-        // Only handle CPMM venues
-        if (venue !== VenueId.PumpSwap && venue !== VenueId.RaydiumV4) return;
-
-        // Look up vault balances
-        const baseVault = (pool as PumpSwapPool | RaydiumV4Pool).baseVault;
-        const quoteVault = (pool as PumpSwapPool | RaydiumV4Pool).quoteVault;
-        const baseVaultEntry = config.vaultCache.get(baseVault);
-        const quoteVaultEntry = config.vaultCache.get(quoteVault);
+        const cp = pool as PumpSwapPool | RaydiumV4Pool;
+        const baseVaultEntry = config.vaultCache.get(cp.baseVault);
+        const quoteVaultEntry = config.vaultCache.get(cp.quoteVault);
         if (!baseVaultEntry || !quoteVaultEntry) return;
 
-        // Enrich pool with reserves + fees (venue-specific)
-        let enrichedPool: EnrichedPool;
-        if (venue === VenueId.PumpSwap) {
-            enrichedPool = enrichPumpSwapPool(
-                pool as PumpSwapPool,
-                baseVaultEntry.amount,
-                quoteVaultEntry.amount,
-            );
-        } else {
-            enrichedPool = enrichRaydiumV4Pool(
-                pool as RaydiumV4Pool,
-                baseVaultEntry.amount,
-                quoteVaultEntry.amount,
-            );
+        const maxStateLagSlots = config.maxStateLagSlots ?? 8;
+        if (
+            poolEntry.slot - baseVaultEntry.slot > maxStateLagSlots ||
+            poolEntry.slot - quoteVaultEntry.slot > maxStateLagSlots
+        ) {
+            stats.staleStateSkips++;
+            return;
         }
 
-        // Validate reserves are positive
-        if (enrichedPool.baseReserve <= 0n || enrichedPool.quoteReserve <= 0n) return;
+        const baseReserve = pool.venue === VenueId.RaydiumV4
+            ? baseVaultEntry.amount - (cp as RaydiumV4Pool).baseNeedTakePnl
+            : baseVaultEntry.amount;
+        const quoteReserve = pool.venue === VenueId.RaydiumV4
+            ? quoteVaultEntry.amount - (cp as RaydiumV4Pool).quoteNeedTakePnl
+            : quoteVaultEntry.amount;
 
-        const totalFeeBps = enrichedPool.lpFeeBps + enrichedPool.protocolFeeBps;
+        if (baseReserve <= 0n || quoteReserve <= 0n) return;
 
-        // Determine victim's actual input amount
-        let victimInput: bigint;
+        const feeBps = pool.venue === VenueId.RaydiumV4
+            ? ((cp as RaydiumV4Pool).swapFeeDenominator > 0n
+                ? ((cp as RaydiumV4Pool).swapFeeNumerator * 10000n) / (cp as RaydiumV4Pool).swapFeeDenominator
+                : 25n)
+            : (((cp as PumpSwapPool).lpFeeBps ?? 20n) + ((cp as PumpSwapPool).protocolFeeBps ?? 5n));
 
-        if (leg.exactSide === 'output') {
-            const reserves = leg.direction === SwapDirection.BtoA
-                ? { reserveIn: enrichedPool.quoteReserve, reserveOut: enrichedPool.baseReserve }
-                : { reserveIn: enrichedPool.baseReserve, reserveOut: enrichedPool.quoteReserve };
-            victimInput = getAmountIn(
-                leg.minOutputAmount,
-                reserves.reserveIn,
-                reserves.reserveOut,
-                totalFeeBps,
-            );
-            if (victimInput <= 0n || victimInput > leg.inputAmount) {
-                victimInput = leg.inputAmount;
-            }
-        } else {
-            victimInput = leg.inputAmount;
-        }
+        const victimPool = {
+            ...cp,
+            baseReserve,
+            quoteReserve,
+            lpFeeBps: feeBps,
+            protocolFeeBps: 0n,
+        } as any;
 
-        // Simulate victim swap
-        const victimResult = simulateConstantProduct({
+        const victim = simulateConstantProduct({
             pool: leg.pool,
-            venue,
+            venue: pool.venue,
             direction: leg.direction,
-            inputAmount: victimInput,
-            poolState: enrichedPool,
+            inputAmount: leg.inputAmount,
+            poolState: victimPool,
         });
+        if (!victim.success) return;
 
-        if (!victimResult.success) return;
-
-        // ====================================================================
-        // Round-trip backrun: always start and end in SOL (quote side)
-        //
-        // For SOL-paired pools (base=token, quote=SOL):
-        //   BtoA = SOL→token (buy), AtoB = token→SOL (sell)
-        //
-        // Our round-trip must be SOL-in → SOL-out:
-        //   Swap1: BtoA (SOL→token) — enter position
-        //   Swap2: AtoB (token→SOL) — close position
-        //
-        // We profit when the victim's swap created a price dislocation
-        // that we can exploit by trading in the opposite direction.
-        //
-        // For victim BtoA (buy token): price goes up → we buy BEFORE is not
-        //   possible (backrun), so we sell token (AtoB) at inflated price.
-        //   But we need tokens to sell → this is actually:
-        //   We need the round-trip where candidateInput is SOL:
-        //     Swap1: BtoA (SOL→token) on post-victim state
-        //     Swap2: AtoB (token→SOL) on post-swap1 state
-        //   Profit = swap2 SOL out - candidateInput SOL in
-        //
-        // For victim AtoB (sell token): price goes down → we buy cheap:
-        //     Swap1: BtoA (SOL→token) on post-victim state — get cheap tokens
-        //     Swap2: AtoB (token→SOL) on post-swap1 state — sell tokens
-        //   Same round-trip direction regardless of victim direction.
-        //
-        // The key insight: our round-trip is ALWAYS BtoA then AtoB.
-        // SIZE_CANDIDATES are always in SOL lamports.
-        // Profit is always in SOL lamports.
-        // ====================================================================
-
-        const ourDir1 = SwapDirection.BtoA; // SOL → token (enter)
-        const ourDir2 = SwapDirection.AtoB; // token → SOL (close)
-
-        // Try candidate sizes, pick max profit
-        let bestProfit = -1n;
         let bestInput = 0n;
         let bestSwap1Out = 0n;
         let bestSwap2Out = 0n;
+        let bestNet = -1n;
 
         for (const candidateInput of SIZE_CANDIDATES) {
-            // Skip if candidate exceeds quote reserve (can't buy more than exists)
-            if (candidateInput >= (victimResult.newPoolState as PumpSwapPool | RaydiumV4Pool).quoteReserve!) continue;
-
-            // Swap 1: SOL → token (BtoA) on post-victim state
-            const swap1 = simulateConstantProduct({
+            const s1 = simulateConstantProduct({
                 pool: leg.pool,
-                venue,
-                direction: ourDir1,
+                venue: pool.venue,
+                direction: Dir.BtoA,
                 inputAmount: candidateInput,
-                poolState: victimResult.newPoolState,
+                poolState: victim.newPoolState,
             });
-            if (!swap1.success || swap1.outputAmount === 0n) continue;
+            if (!s1.success || s1.outputAmount <= 0n) continue;
 
-            // Swap 2: token → SOL (AtoB) on post-swap1 state
-            const swap2 = simulateConstantProduct({
+            const s2 = simulateConstantProduct({
                 pool: leg.pool,
-                venue,
-                direction: ourDir2,
-                inputAmount: swap1.outputAmount,
-                poolState: swap1.newPoolState,
+                venue: pool.venue,
+                direction: Dir.AtoB,
+                inputAmount: s1.outputAmount,
+                poolState: s1.newPoolState,
             });
-            if (!swap2.success || swap2.outputAmount === 0n) continue;
+            if (!s2.success || s2.outputAmount <= candidateInput) continue;
 
-            // Profit = SOL out - SOL in (both in lamports, same denomination)
-            const grossProfit = swap2.outputAmount - candidateInput;
-            if (grossProfit > bestProfit) {
-                bestProfit = grossProfit;
+            const gross = s2.outputAmount - candidateInput;
+            const net = gross - config.tipLamports - gasCostLamports;
+            if (net > bestNet) {
+                bestNet = net;
                 bestInput = candidateInput;
-                bestSwap1Out = swap1.outputAmount;
-                bestSwap2Out = swap2.outputAmount;
+                bestSwap1Out = s1.outputAmount;
+                bestSwap2Out = s2.outputAmount;
             }
         }
 
-        if (bestProfit <= 0n) return;
+        if (bestNet < config.minProfitLamports) return;
 
-        // Net profit after gas + tip (all in SOL lamports)
-        const netProfit = bestProfit - gasCostLamports - config.tipLamports;
-        if (netProfit < config.minProfitLamports) return;
-
-        stats.opportunitiesFound++;
-
-        // Apply slippage tolerance to min outputs
         const slippageMul = BigInt(10000 - config.slippageBps);
-        const minOut1 = bestSwap1Out * slippageMul / 10000n;
-        const minOut2 = bestSwap2Out * slippageMul / 10000n;
+        const swap1MinOut = (bestSwap1Out * slippageMul) / 10000n;
+        if (swap1MinOut <= 0n) {
+            recordSkip('swap1_min_out_zero', update);
+            return;
+        }
+        const conservativeSwap2Out = bestSwap1Out > 0n
+            ? (bestSwap2Out * swap1MinOut) / bestSwap1Out
+            : 0n;
+        const swap2MinOut = (conservativeSwap2Out * slippageMul) / 10000n;
+        if (swap2MinOut <= 0n) {
+            recordSkip('swap2_min_out_zero', update);
+            return;
+        }
 
-        // Build swap params
         const swap1Params: SwapParams = {
-            direction: ourDir1,
+            direction: Dir.BtoA,
             inputAmount: bestInput,
-            minOutput: minOut1,
-            pool: enrichedPool,
+            minOutput: swap1MinOut,
+            pool: cp,
         };
-
         const swap2Params: SwapParams = {
-            direction: ourDir2,
-            inputAmount: bestSwap1Out,
-            minOutput: minOut2,
-            pool: enrichedPool,
+            direction: Dir.AtoB,
+            inputAmount: swap1MinOut,
+            minOutput: swap2MinOut,
+            pool: cp,
         };
 
-        // Reconstruct victim raw tx for bundle inclusion
-        // Format: [compactU16(1), signature(64), message]
-        const victimTxBytes = new Uint8Array(1 + 64 + update.message.length);
-        victimTxBytes[0] = 1; // 1 signature
-        victimTxBytes.set(update.signature, 1);
-        victimTxBytes.set(update.message, 65);
+        if (
+            !isU64(swap1Params.inputAmount) ||
+            !isU64(swap1Params.minOutput) ||
+            !isU64(swap2Params.inputAmount) ||
+            !isU64(swap2Params.minOutput)
+        ) {
+            recordSkip('amount_overflow_u64', update);
+            return;
+        }
 
-        // Build bundle
+        const victimTx = buildVictimTxBytes(update);
+        if (!victimTx.ok) {
+            recordSkip(victimTx.reason, update);
+            return;
+        }
+
         const result = buildBundle(
             swap1Params,
             swap2Params,
             config.payerKeypair,
             bundleConfig,
             config.getRecentBlockhash(),
-            victimTxBytes,
+            victimTx.bytes,
         );
 
         if (!result.success || !result.bundle) return;
 
+        stats.opportunitiesFound++;
         stats.bundlesBuilt++;
 
         if (config.dryRun) {
-            // Dry-run: log opportunity details without submitting
             stats.bundlesSubmitted++;
-            stats.totalProfitLamports += netProfit;
-            console.log(
-                `[backrun:dry] venue=${venue === VenueId.PumpSwap ? 'PumpSwap' : 'RaydiumV4'} ` +
-                `profit=${(Number(netProfit) / 1e9).toFixed(6)}SOL ` +
-                `input=${(Number(bestInput) / 1e9).toFixed(3)}SOL ` +
-                `swap1out=${bestSwap1Out} swap2out=${bestSwap2Out} ` +
-                `latency=${result.buildLatencyUs.toFixed(0)}us`,
-            );
+            stats.totalProfitLamports += bestNet;
             return;
         }
 
-        // Fire-and-forget submission
         config.jitoClient.submitWithRetry(result.bundle).then(submitResult => {
-            if (submitResult.submitted) {
-                stats.bundlesSubmitted++;
-                stats.totalProfitLamports += netProfit;
-                if (process.env.DEBUG) {
-                    console.log(
-                        `[backrun] SUBMITTED bundle=${submitResult.bundleId} ` +
-                        `venue=${venue === VenueId.PumpSwap ? 'PS' : 'RV4'} ` +
-                        `profit=${(Number(netProfit) / 1e9).toFixed(6)}SOL ` +
-                        `input=${(Number(bestInput) / 1e9).toFixed(3)}SOL ` +
-                        `latency=${result.buildLatencyUs.toFixed(0)}us`,
-                    );
-                }
-            }
+            if (!submitResult.submitted) return;
+            stats.bundlesSubmitted++;
+            stats.totalProfitLamports += bestNet;
         }).catch(() => {
-            // Submission errors already tracked in JitoClient stats
+            // tracked by submit client
         });
     }
 
     return {
         handleShredEvent,
-        getStats: (): BackrunStats => ({ ...stats }),
+        handleCacheEvent,
+        flushShadowSummary: () => maybeWriteShadowSummary(true),
+        getStats: (): BackrunStats => {
+            stats.pairIndex = pairIndex.stats();
+            return {
+                ...stats,
+                skipReasons: { ...stats.skipReasons },
+            };
+        },
     };
 }

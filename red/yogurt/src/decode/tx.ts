@@ -444,6 +444,7 @@ function buildDecodedTx(
         payer,
         legs: [], // Populated by swap decoder (Phase 5)
         accountKeys,
+        instructions,
     };
 
     return { success: true, tx };

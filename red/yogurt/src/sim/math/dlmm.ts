@@ -30,6 +30,11 @@ const BASIS_POINT_MAX = 10000;
 const BINS_PER_ARRAY = 70;
 // Price precision
 const PRICE_PRECISION = 1_000_000_000_000n; // 10^12 for internal math
+// DLMM fee constants (from Meteora formula documentation)
+const DLMM_FEE_PRECISION = 1_000_000_000n;
+const DLMM_MAX_FEE_RATE = 100_000_000n; // 10% in 1e9 fee precision
+const DLMM_VAR_FEE_SCALE = 100_000_000_000n;
+const DLMM_VAR_FEE_OFFSET = 99_999_999_999n;
 
 /**
  * Fixed-point exponentiation by squaring
@@ -251,53 +256,85 @@ export function swapInBin(
 
 /**
  * Calculate dynamic fee based on volatility
- * 
- * DLMM uses a dynamic fee structure:
- * - baseFee = baseFactor * binStep (in basis points * 100)
- * - variableFee = volatilityAccumulator-based
- * - totalFee = baseFee + variableFee
+ *
+ * Meteora DLMM fee model:
+ * - fee precision: 1e9
+ * - baseFeeRate = baseFactor * binStep * 10 * 10^baseFeePowerFactor
+ * - variableFeeRate = (variableFeeControl * (volatilityAccumulator * binStep)^2 + OFFSET) / SCALE
+ * - total fee rate capped at 100,000,000 (10%)
  */
+function computeDynamicFeeRate(
+    baseFactor: bigint,
+    binStep: number,
+    variableFeeControl: bigint,
+    volatilityAccumulator: bigint,
+    maxVolatilityAccumulator?: number,
+    baseFeePowerFactor = 0
+): bigint {
+    const binStepBig = BigInt(binStep);
+    const feePower = baseFeePowerFactor < 0 ? 0 : baseFeePowerFactor;
+    const baseFeeRate = feePower > 9
+        ? DLMM_MAX_FEE_RATE
+        : baseFactor * binStepBig * 10n * (10n ** BigInt(feePower));
+    const cappedVolatility = maxVolatilityAccumulator !== undefined
+        ? (volatilityAccumulator > BigInt(maxVolatilityAccumulator)
+            ? BigInt(maxVolatilityAccumulator)
+            : volatilityAccumulator)
+        : volatilityAccumulator;
+
+    // variableFeeRate = (variableFeeControl * (volatilityAccumulator * binStep)^2 + OFFSET) / SCALE.
+    const volatilityStep = cappedVolatility * binStepBig;
+    const variableFeeRate = variableFeeControl > 0n
+        ? (variableFeeControl * volatilityStep * volatilityStep + DLMM_VAR_FEE_OFFSET) / DLMM_VAR_FEE_SCALE
+        : 0n;
+    const totalFeeRate = baseFeeRate + variableFeeRate;
+    const clampedFeeRate = totalFeeRate > DLMM_MAX_FEE_RATE
+        ? DLMM_MAX_FEE_RATE
+        : totalFeeRate;
+
+    return clampedFeeRate;
+}
+
 export function calculateDynamicFee(
     baseFactor: bigint,
     binStep: number,
-    variableFeeFactor: bigint,
-    volatilityAccumulator: bigint
+    variableFeeControl: bigint,
+    volatilityAccumulator: bigint,
+    maxVolatilityAccumulator?: number,
+    baseFeePowerFactor = 0
 ): bigint {
-    // Base fee: baseFactor * binStep / 10000 (convert from 1e-10 to bps)
-    // Meteora DLMM: baseFactor * binStep is in 1e-10 precision
-    // To convert to basis points: divide by 10000
-    const binStepBig = BigInt(binStep);
-    const baseFee = (baseFactor * binStepBig) / 10000n;
+    const clampedFeeRate = computeDynamicFeeRate(
+        baseFactor,
+        binStep,
+        variableFeeControl,
+        volatilityAccumulator,
+        maxVolatilityAccumulator,
+        baseFeePowerFactor
+    );
 
-    // Variable fee based on volatility
-    // variableFee = (volatilityAccumulator * variableFeeFactor) / scale
-    const variableFee = (volatilityAccumulator * variableFeeFactor) / (SCALE / 10000n);
+    // Convert to basis points for legacy callers.
+    return (clampedFeeRate * BigInt(BASIS_POINT_MAX)) / DLMM_FEE_PRECISION;
+}
 
-    // Total fee capped at 10% (1000 bps)
-    const totalFee = baseFee + variableFee;
-    return totalFee > 1000n ? 1000n : totalFee;
+function getPoolFeeRate(pool: MeteoraDlmmPool): bigint {
+    const variableFeeControl = pool.variableFeeControl ?? pool.variableFeeFactor ?? 0n;
+    const volatilityAccumulator = BigInt(pool.volatilityAccumulator);
+    return computeDynamicFeeRate(
+        pool.baseFactor,
+        pool.binStep,
+        variableFeeControl,
+        volatilityAccumulator,
+        pool.maxVolatilityAccumulator,
+        pool.baseFeePowerFactor ?? 0
+    );
 }
 
 /**
  * Get total fee in basis points from pool state
  */
 export function getPoolFee(pool: MeteoraDlmmPool): bigint {
-    // Base fee in basis points (1e-10 precision to bps)
-    const binStepBig = BigInt(pool.binStep);
-    const baseFee = (pool.baseFactor * binStepBig) / 10000n;
-
-    // If pool has volatility data, calculate variable fee
-    const vff = pool.variableFeeFactor;
-    if (vff && pool.volatilityAccumulator) {
-        return calculateDynamicFee(
-            pool.baseFactor,
-            pool.binStep,
-            vff,
-            BigInt(pool.volatilityAccumulator)
-        );
-    }
-
-    return baseFee;
+    const feeRate = getPoolFeeRate(pool);
+    return (feeRate * BigInt(BASIS_POINT_MAX)) / DLMM_FEE_PRECISION;
 }
 
 /**
@@ -353,11 +390,9 @@ export function simulateDlmm(
 
     const swapForY = direction === SwapDirection.AtoB;
 
-    // Get fee
-    const feeRate = getPoolFee(pool);
-
-    // Apply fee to input
-    const feeAmount = (inputAmount * BigInt(feeRate)) / 10000n;
+    // Apply fee to input (full 1e9 fee-rate precision).
+    const feeRate = getPoolFeeRate(pool);
+    const feeAmount = (inputAmount * feeRate) / DLMM_FEE_PRECISION;
     let amountRemaining = inputAmount - feeAmount;
     let amountCalculated = 0n;
 
@@ -535,8 +570,8 @@ export function estimateOutputAmount(
     pool: MeteoraDlmmPool,
     swapForY: boolean
 ): bigint {
-    const feeRate = getPoolFee(pool);
-    const amountAfterFee = inputAmount - (inputAmount * BigInt(feeRate)) / 10000n;
+    const feeRate = getPoolFeeRate(pool);
+    const amountAfterFee = inputAmount - (inputAmount * feeRate) / DLMM_FEE_PRECISION;
     const binPriceX64 = getPriceFromBinId(pool.activeId, pool.binStep);
 
     // Guard against division by zero

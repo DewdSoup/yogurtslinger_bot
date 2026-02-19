@@ -22,8 +22,8 @@
  *   [592..624] targetOrders (pubkey)
  *
  * Swap Instructions (native, single-byte discriminator):
- *   9  = swapBaseIn  (exact input)
- *   11 = swapBaseOut (exact output)
+ *   9/16  = swapBaseIn / swapBaseInV2  (exact input)
+ *   11/17 = swapBaseOut / swapBaseOutV2 (exact output)
  */
 
 import type { RaydiumV4Pool, CompiledInstruction, SwapLeg } from '../../types.js';
@@ -34,16 +34,16 @@ const EXACT_SIZE = 752;
 // Swap instruction discriminators (single byte, native program)
 const SWAP_BASE_IN = 9;
 const SWAP_BASE_OUT = 11;
+const SWAP_BASE_IN_V2 = 16;
+const SWAP_BASE_OUT_V2 = 17;
 
 // Swap instruction account indices
 const IDX_AMM = 1;
 const IDX_POOL_COIN_VAULT = 5;
 const IDX_POOL_PC_VAULT = 6;
-const IDX_USER_SOURCE = 15;
-const IDX_USER_DEST = 16;
 
 const SWAP_MIN_DATA_LEN = 17; // disc(1) + amountIn(8) + amountOut(8)
-const SWAP_MIN_ACCOUNTS = 18;
+const SWAP_MIN_ACCOUNTS = IDX_AMM + 1;
 
 /**
  * Fast size check (V4 has no discriminator)
@@ -101,25 +101,30 @@ export function decodeRaydiumV4Pool(
 export function isRaydiumV4Swap(data: Uint8Array): boolean {
     if (data.length < SWAP_MIN_DATA_LEN) return false;
     const disc = data[0];
-    return disc === SWAP_BASE_IN || disc === SWAP_BASE_OUT;
+    return (
+        disc === SWAP_BASE_IN ||
+        disc === SWAP_BASE_OUT ||
+        disc === SWAP_BASE_IN_V2 ||
+        disc === SWAP_BASE_OUT_V2
+    );
 }
 
 /**
  * Check if instruction is swapBaseIn (exact input)
  */
 export function isSwapBaseIn(data: Uint8Array): boolean {
-    return data.length >= 1 && data[0] === SWAP_BASE_IN;
+    return data.length >= 1 && (data[0] === SWAP_BASE_IN || data[0] === SWAP_BASE_IN_V2);
 }
 
 /**
  * Decode Raydium V4 swap instruction
  *
- * swapBaseIn layout (17 bytes):
+ * swapBaseIn / swapBaseInV2 layout (17 bytes):
  *   [0]      discriminator (u8) = 9
  *   [1..9]   amountIn (u64 LE)
  *   [9..17]  minAmountOut (u64 LE)
  *
- * swapBaseOut layout (17 bytes):
+ * swapBaseOut / swapBaseOutV2 layout (17 bytes):
  *   [0]      discriminator (u8) = 11
  *   [1..9]   maxAmountIn (u64 LE)
  *   [9..17]  amountOut (u64 LE)
@@ -174,11 +179,8 @@ export function decodeRaydiumV4Instruction(
     const ammIdx = accountKeyIndexes[IDX_AMM];
     const coinVaultIdx = accountKeyIndexes[IDX_POOL_COIN_VAULT];
     const pcVaultIdx = accountKeyIndexes[IDX_POOL_PC_VAULT];
-    const userSourceIdx = accountKeyIndexes[IDX_USER_SOURCE];
-    const userDestIdx = accountKeyIndexes[IDX_USER_DEST];
 
-    if (ammIdx === undefined || coinVaultIdx === undefined || pcVaultIdx === undefined ||
-        userSourceIdx === undefined || userDestIdx === undefined) {
+    if (ammIdx === undefined) {
         return null;
     }
 
@@ -224,10 +226,8 @@ export function decodeRaydiumV4InstructionWithPool(
     const minOutputAmount = view.getBigUint64(9, true);
 
     const ammIdx = accountKeyIndexes[IDX_AMM];
-    const userSourceIdx = accountKeyIndexes[IDX_USER_SOURCE];
-    const userDestIdx = accountKeyIndexes[IDX_USER_DEST];
 
-    if (ammIdx === undefined || userSourceIdx === undefined || userDestIdx === undefined) {
+    if (ammIdx === undefined) {
         return null;
     }
 

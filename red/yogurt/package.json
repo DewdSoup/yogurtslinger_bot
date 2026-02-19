@@ -9,10 +9,15 @@
         "evidence": "tsx scripts/capture-evidence.ts",
         "analyze:cross-venue": "tsx scripts/analyze-cross-venue.ts",
         "watch:cross-venue": "tsx scripts/watch-cross-venue.ts",
+        "shadow:cross-venue": "tsx scripts/run-cross-venue-shadow.ts",
+        "diagnose:shadow": "tsx scripts/diagnose-shadow-cross-venue.ts",
+        "readiness:shadow": "tsx scripts/readiness-shadow-cross-venue.ts",
+        "prove:dlmm": "tsx scripts/prove-dlmm-l2.ts",
         "proof:topology": "tsx scripts/proof-topology-oracle.ts",
         "validate:topology": "tsx scripts/validate-topology-oracle-live.ts",
         "validate:sim": "tsx scripts/validate-simulation.ts",
         "verify:evidence": "tsx scripts/verify-evidence-schema.ts",
+        "test": "tsx --test src/execute/*.spec.ts src/sim/math/*.spec.ts",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {

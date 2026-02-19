@@ -176,15 +176,19 @@ export interface MeteoraDlmmPool {
     tokenYMint: Uint8Array;
     vaultX: Uint8Array;
     vaultY: Uint8Array;
+    oracle?: Uint8Array;
     binStep: number;
     activeId: number;
     // Fee params
     baseFactor: bigint;
+    baseFeePowerFactor?: number;
     protocolShare: bigint;
     // Variable fee params (needed for dynamic fee calc)
     volatilityAccumulator: number;
     volatilityReference: number;
-    variableFeeFactor?: bigint;  // For dynamic fee calculation
+    variableFeeFactor?: bigint;  // Legacy alias for variableFeeControl
+    variableFeeControl?: bigint; // u32 static parameter
+    maxVolatilityAccumulator?: number; // u32 static parameter
     // Status
     status: number;
     /**
@@ -309,6 +313,7 @@ export interface DecodedTx {
     payer: Uint8Array;
     legs: SwapLeg[];
     accountKeys: Uint8Array[];  // Resolved (including ALT)
+    instructions?: CompiledInstruction[];
 }
 
 // ============================================================================

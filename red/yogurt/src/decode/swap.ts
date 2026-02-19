@@ -33,8 +33,10 @@ import {
 } from './programs/raydiumClmm.js';
 import {
     decodeMeteoraDlmmInstruction,
+    decodeMeteoraDlmmInstructionWithPool,
     isMeteoraDlmmSwap
 } from './programs/meteoraDlmm.js';
+import type { MeteoraDlmmPool } from '../types.js';
 
 // Pre-computed program ID bytes for fast comparison (avoid base58 in hot path)
 // PumpSwap: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
@@ -191,6 +193,23 @@ function decodeSwapByVenue(
             return decodeRaydiumClmmInstruction(instruction, accountKeys);
         }
         case V.MeteoraDlmm:
+            if (poolLookup) {
+                // For DLMM, lbPair account is at index 0.
+                const poolIdx = instruction.accountKeyIndexes[0];
+                if (poolIdx !== undefined) {
+                    const poolPubkey = accountKeys[poolIdx];
+                    if (poolPubkey) {
+                        const poolState = poolLookup(poolPubkey);
+                        if (poolState && poolState.venue === V.MeteoraDlmm) {
+                            return decodeMeteoraDlmmInstructionWithPool(
+                                instruction,
+                                accountKeys,
+                                poolState as MeteoraDlmmPool
+                            );
+                        }
+                    }
+                }
+            }
             return decodeMeteoraDlmmInstruction(instruction, accountKeys);
         default:
             return null;

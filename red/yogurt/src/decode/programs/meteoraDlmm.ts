@@ -8,7 +8,10 @@
  *   [0..8]     discriminator
  *   --- StaticParameters (offset 8) ---
  *   [8..10]    baseFactor (u16)
+ *   [16..20]   variableFeeControl (u32)
+ *   [20..24]   maxVolatilityAccumulator (u32)
  *   [32..34]   protocolShare (u16)
+ *   [34]       baseFeePowerFactor (u8)
  *   --- VariableParameters (offset 40) ---
  *   [40..44]   volatilityAccumulator (u32)
  *   [44..48]   volatilityReference (u32)
@@ -109,9 +112,15 @@ export function decodeMeteoraDlmmPool(
         tokenYMint: data.slice(120, 152),
         vaultX: data.slice(152, 184),
         vaultY: data.slice(184, 216),
+        oracle: data.slice(408, 440),
         binStep: view.getUint16(80, true),
         activeId: view.getInt32(76, true),
         baseFactor: BigInt(view.getUint16(8, true)),
+        baseFeePowerFactor: data[34]!,
+        variableFeeControl: BigInt(view.getUint32(16, true)),
+        maxVolatilityAccumulator: view.getUint32(20, true),
+        // Keep legacy alias for compatibility with existing call sites.
+        variableFeeFactor: BigInt(view.getUint32(16, true)),
         protocolShare: BigInt(view.getUint16(32, true)),
         volatilityAccumulator: view.getUint32(40, true),
         volatilityReference: view.getUint32(44, true),
