@@ -12,12 +12,37 @@ import type { SearcherClient } from 'jito-ts/dist/sdk/block-engine/searcher.js';
 import type { BundleResult } from '../types.js';
 import type { BundleRequest, JitoConfig } from './types.js';
 
+export type BundleResultState = 'accepted' | 'rejected' | 'processed' | 'finalized' | 'dropped';
+
+export interface BundleResultEvent {
+    bundleId: string;
+    state: BundleResultState;
+    slot?: number;
+    validatorIdentity?: string;
+    reason?: string;
+}
+
 export class JitoClient {
     private config: JitoConfig;
     private client: SearcherClient | null = null;
     private bundlesSent = 0n;
     private bundlesLanded = 0n;
     private bundlesFailed = 0n;
+    private bundlesAccepted = 0n;
+    private bundlesRejected = 0n;
+    private bundlesProcessed = 0n;
+    private bundlesFinalized = 0n;
+    private bundlesDropped = 0n;
+    private bundleResultsLoopStarted = false;
+    private bundleResultsLoopActive = false;
+    private acceptedSeen = new Set<string>();
+    private rejectedSeen = new Set<string>();
+    private processedSeen = new Set<string>();
+    private finalizedSeen = new Set<string>();
+    private droppedSeen = new Set<string>();
+    private landedSeen = new Set<string>();
+    private sentBundleIds = new Set<string>();
+    private bundleResultListener?: (event: BundleResultEvent) => void;
 
     constructor(config: JitoConfig) {
         this.config = config;
@@ -63,6 +88,7 @@ export class JitoClient {
 
             if ('value' in result && typeof result.value === 'string') {
                 this.bundlesSent++;
+                this.sentBundleIds.add(result.value);
                 return {
                     bundleId: result.value,
                     submitted: true,
@@ -97,10 +123,104 @@ export class JitoClient {
      */
     subscribeBundleResults(): void {
         if (!this.client) return;
-        this.client.onBundleResult(
-            () => { this.bundlesLanded++; },
-            () => { /* stream errors are non-fatal */ },
-        );
+        if (this.bundleResultsLoopStarted) return;
+        this.bundleResultsLoopStarted = true;
+        this.bundleResultsLoopActive = true;
+        void this.runBundleResultsLoop();
+    }
+
+    setBundleResultListener(listener: ((event: BundleResultEvent) => void) | undefined): void {
+        this.bundleResultListener = listener;
+    }
+
+    private emitBundleResult(event: BundleResultEvent): void {
+        try {
+            this.bundleResultListener?.(event);
+        } catch {}
+    }
+
+    private async runBundleResultsLoop(): Promise<void> {
+        while (this.bundleResultsLoopActive) {
+            if (!this.client) return;
+            try {
+                for await (const _ of this.client.bundleResults((e: Error) => {
+                    console.warn(`[jito] bundle result stream error: ${e.message}`);
+                })) {
+                    const result = _ as any;
+                    const bundleId = typeof result?.bundleId === 'string' ? result.bundleId : '';
+                    if (!bundleId || !this.sentBundleIds.has(bundleId)) {
+                        if (!this.bundleResultsLoopActive) return;
+                        continue;
+                    }
+
+                    if (result?.accepted && !this.acceptedSeen.has(bundleId)) {
+                        this.acceptedSeen.add(bundleId);
+                        this.bundlesAccepted++;
+                        this.emitBundleResult({
+                            bundleId,
+                            state: 'accepted',
+                            slot: result.accepted.slot,
+                            validatorIdentity: result.accepted.validatorIdentity,
+                        });
+                    }
+                    if (result?.rejected && !this.rejectedSeen.has(bundleId)) {
+                        this.rejectedSeen.add(bundleId);
+                        this.bundlesRejected++;
+                        this.emitBundleResult({
+                            bundleId,
+                            state: 'rejected',
+                            reason: describeRejectedReason(result.rejected),
+                        });
+                    }
+                    if (result?.processed && !this.processedSeen.has(bundleId)) {
+                        this.processedSeen.add(bundleId);
+                        this.bundlesProcessed++;
+                        this.emitBundleResult({
+                            bundleId,
+                            state: 'processed',
+                            slot: result.processed.slot,
+                            validatorIdentity: result.processed.validatorIdentity,
+                        });
+                    }
+                    if (result?.finalized && !this.finalizedSeen.has(bundleId)) {
+                        this.finalizedSeen.add(bundleId);
+                        this.bundlesFinalized++;
+                        this.emitBundleResult({
+                            bundleId,
+                            state: 'finalized',
+                            slot: result.finalized.slot,
+                            validatorIdentity: result.finalized.validatorIdentity,
+                        });
+                    }
+                    if (result?.dropped && !this.droppedSeen.has(bundleId)) {
+                        this.droppedSeen.add(bundleId);
+                        this.bundlesDropped++;
+                        this.emitBundleResult({
+                            bundleId,
+                            state: 'dropped',
+                            reason: describeDroppedReason(result.dropped?.reason),
+                        });
+                    }
+
+                    if (
+                        !this.landedSeen.has(bundleId) &&
+                        result?.finalized
+                    ) {
+                        this.landedSeen.add(bundleId);
+                        this.bundlesLanded++;
+                    }
+                    if (!this.bundleResultsLoopActive) return;
+                }
+                if (this.bundleResultsLoopActive) {
+                    console.warn('[jito] bundle result stream ended, reconnecting');
+                    await sleep(1000);
+                }
+            } catch (e) {
+                if (!this.bundleResultsLoopActive) return;
+                console.warn(`[jito] bundle result stream restart after error: ${String(e)}`);
+                await sleep(1000);
+            }
+        }
     }
 
     /**
@@ -139,6 +259,11 @@ export class JitoClient {
             bundlesSent: this.bundlesSent,
             bundlesLanded: this.bundlesLanded,
             bundlesFailed: this.bundlesFailed,
+            bundlesAccepted: this.bundlesAccepted,
+            bundlesRejected: this.bundlesRejected,
+            bundlesProcessed: this.bundlesProcessed,
+            bundlesFinalized: this.bundlesFinalized,
+            bundlesDropped: this.bundlesDropped,
             landingRate: this.bundlesSent > 0n
                 ? Number((this.bundlesLanded * 10000n) / this.bundlesSent) / 100
                 : 0,
@@ -155,4 +280,31 @@ export function createJitoClient(config: JitoConfig): JitoClient {
 
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function describeDroppedReason(reason: unknown): string {
+    if (reason === 0) return 'BlockhashExpired';
+    if (reason === 1) return 'PartiallyProcessed';
+    if (reason === 2) return 'NotFinalized';
+    return `UnknownDroppedReason(${String(reason)})`;
+}
+
+function describeRejectedReason(rejected: any): string {
+    if (!rejected) return 'unknown';
+    if (rejected.stateAuctionBidRejected) {
+        return `stateAuctionBidRejected:${rejected.stateAuctionBidRejected.msg ?? ''}`;
+    }
+    if (rejected.winningBatchBidRejected) {
+        return `winningBatchBidRejected:${rejected.winningBatchBidRejected.msg ?? ''}`;
+    }
+    if (rejected.simulationFailure) {
+        return `simulationFailure:${rejected.simulationFailure.msg ?? ''}`;
+    }
+    if (rejected.internalError) {
+        return `internalError:${rejected.internalError.msg ?? ''}`;
+    }
+    if (rejected.droppedBundle) {
+        return `droppedBundle:${rejected.droppedBundle.msg ?? ''}`;
+    }
+    return 'unknown';
 }

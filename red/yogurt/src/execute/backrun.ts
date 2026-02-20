@@ -11,6 +11,7 @@
 import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { VersionedMessage } from '@solana/web3.js';
 import type { Keypair } from '@solana/web3.js';
 import type {
     IngestEvent,
@@ -32,11 +33,13 @@ import {
 import { simulateDlmm } from '../sim/math/dlmm.js';
 import { decodeTx, type AltCache as TxAltCache } from '../decode/tx.js';
 import { extractSwapLegs } from '../decode/swap.js';
+import { decodePumpSwapInstruction } from '../decode/programs/pumpswap.js';
 import { buildSnapshot } from '../snapshot/builder.js';
 import type { SimulationSnapshot, SnapshotError } from '../snapshot/types.js';
 import { buildBundle, deriveDlmmBinArrayPda } from './bundle.js';
-import type { SwapParams, DlmmSwapMeta } from './bundle.js';
+import type { SwapParams, DlmmSwapMeta, PumpRemainingAccountMeta } from './bundle.js';
 import type { JitoClient } from './submit.js';
+import type { BundleRequest } from './types.js';
 import { PairIndex } from './pairIndex.js';
 import type { PoolCache } from '../cache/pool.js';
 import type { VaultCache } from '../cache/vault.js';
@@ -77,7 +80,8 @@ const SIZE_CANDIDATES = parseSizeCandidatesFromEnv(process.env.BACKRUN_SIZE_CAND
 const WSOL_MINT_HEX = '069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001';
 const U64_MAX = (1n << 64n) - 1n;
 const BINS_PER_ARRAY = 70;
-const DLMM_BIN_ARRAYS_PER_IX = 3;
+const DLMM_BIN_ARRAYS_PER_IX = parseDlmmBinArraysPerIx(process.env.DLMM_BIN_ARRAYS_PER_IX);
+const PUMPSWAP_PROGRAM_HEX = '0186f6d8f8225f83640e8bd8d7f53a3f6b95d8ce3460d30dc0dc9ce4ff754f7d';
 
 export type StrategyMode = 'legacy_cpmm_same_pool' | 'cross_venue_ps_dlmm';
 
@@ -101,15 +105,20 @@ export interface BackrunConfig {
     computeUnitLimit: number;
     computeUnitPrice: bigint;
     slippageBps: number;
+    executionSlippageBps?: number;
     conservativeHaircutBps?: number;
     maxStateLagSlots?: number;
     maxNetToInputBps?: number;
     maxAbsoluteNetLamports?: bigint;
+    canaryMaxInputLamports?: bigint;
+    canaryMaxSubmissionsPerHour?: number;
     strictSlotConsistency?: boolean;
+    includeVictimTx?: boolean;
     strategyMode?: StrategyMode;
     includeTopologyFrozenPools?: boolean;
     shadowLedgerPath?: string;
     getRecentBlockhash: () => string;
+    refreshRecentBlockhash?: (force?: boolean) => Promise<string | null>;
     dryRun?: boolean;
 }
 
@@ -159,24 +168,37 @@ interface CandidateEval {
 }
 
 interface ShadowRecord {
+    event?: 'skip' | 'opportunity' | 'submit_result';
     ts: string;
     slot: number;
     signatureHex: string;
     strategy: StrategyMode;
+    runMode?: 'shadow' | 'live';
     pairKey?: string;
     reason?: string;
     candidateInputLamports?: string;
     bestNetLamports?: string;
     bestGrossLamports?: string;
     netToInputBps?: string;
+    tipLamports?: string;
+    gasCostLamports?: string;
+    haircutLamports?: string;
+    swap1MinOutLamports?: string;
+    swap2MinOutLamports?: string;
     route?: CandidateEval['venueRoute'];
     counterpartPool?: string;
     buildSuccess?: boolean;
     buildError?: string;
     candidateCount?: number;
+    bundleId?: string;
+    submitOk?: boolean;
+    submitError?: string;
+    submitLatencyMs?: number;
+    submitMode?: 'primary_with_victim' | 'fallback_without_victim' | 'retry_fresh_blockhash';
 }
 
 interface ShadowLedger {
+    mode: 'shadow' | 'live';
     jsonlPath: string;
     opportunitiesJsonlPath: string;
     latestPath: string;
@@ -221,6 +243,133 @@ function pushLatencySample(samples: bigint[], valueUs: bigint, maxSamples = 1000
 
 function isU64(value: bigint): boolean {
     return value >= 0n && value <= U64_MAX;
+}
+
+function parseDlmmBinArraysPerIx(raw: string | undefined): number {
+    const parsed = Number(raw ?? '');
+    if (!Number.isFinite(parsed)) return 5;
+    const n = Math.floor(parsed);
+    if (n < 3) return 3;
+    if (n > 12) return 12;
+    return n;
+}
+
+function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
+
+function accountMetaFromIndex(
+    accountIndex: number,
+    staticLen: number,
+    writableSignedEnd: number,
+    signedLen: number,
+    writableUnsignedEnd: number,
+    writableLookupLen: number,
+): { isSigner: boolean; isWritable: boolean } {
+    if (accountIndex < staticLen) {
+        const isSigner = accountIndex < signedLen;
+        const isWritable = isSigner
+            ? accountIndex < writableSignedEnd
+            : accountIndex < writableUnsignedEnd;
+        return { isSigner, isWritable };
+    }
+
+    const lookupIndex = accountIndex - staticLen;
+    return {
+        isSigner: false,
+        isWritable: lookupIndex < writableLookupLen,
+    };
+}
+
+function getPumpRemainingAccountsFromVictim(
+    tx: { accountKeys: Uint8Array[]; instructions?: import('../types.js').CompiledInstruction[] },
+    rawMessage: Uint8Array,
+    leg: SwapLeg,
+): PumpRemainingAccountMeta[] | null {
+    const instructions = tx.instructions ?? [];
+    if (instructions.length === 0) return null;
+
+    let message: any;
+    try {
+        message = VersionedMessage.deserialize(rawMessage);
+    } catch {
+        return null;
+    }
+    const staticLen = message.staticAccountKeys?.length ?? 0;
+    const signedLen = message.header?.numRequiredSignatures ?? 0;
+    const readonlySigned = message.header?.numReadonlySignedAccounts ?? 0;
+    const readonlyUnsigned = message.header?.numReadonlyUnsignedAccounts ?? 0;
+    const writableSignedEnd = signedLen - readonlySigned;
+    const writableUnsignedEnd = staticLen - readonlyUnsigned;
+    const writableLookupLen = (message.addressTableLookups ?? [])
+        .reduce((acc: number, l: any) => acc + (l.writableIndexes?.length ?? 0), 0);
+
+    for (const ix of instructions) {
+        const programId = tx.accountKeys[ix.programIdIndex];
+        if (!programId || toHex(programId) !== PUMPSWAP_PROGRAM_HEX) continue;
+
+        const decoded = decodePumpSwapInstruction(ix as any, tx.accountKeys);
+        if (!decoded) continue;
+        if (!equalBytes(decoded.pool, leg.pool) || decoded.direction !== leg.direction) continue;
+
+        const trailing: PumpRemainingAccountMeta[] = [];
+        for (const idx of ix.accountKeyIndexes.slice(9)) {
+            const pk = tx.accountKeys[idx];
+            if (!pk) continue;
+            const meta = accountMetaFromIndex(
+                idx,
+                staticLen,
+                writableSignedEnd,
+                signedLen,
+                writableUnsignedEnd,
+                writableLookupLen,
+            );
+            trailing.push({
+                pubkey: pk,
+                isSigner: meta.isSigner,
+                isWritable: meta.isWritable,
+            });
+        }
+        return trailing.length > 0 ? trailing : null;
+    }
+
+    return null;
+}
+
+function isAlreadyProcessedSubmissionError(error: string | undefined): boolean {
+    if (!error) return false;
+    const lower = error.toLowerCase();
+    return lower.includes('already processed transaction');
+}
+
+function classifySubmitError(error: string | undefined): string | null {
+    if (!error) return null;
+    const lower = error.toLowerCase();
+    if (lower.includes('expired blockhash')) return 'submit_expired_blockhash';
+    if (lower.includes('rate limit exceeded') || lower.includes('resource has been exhausted')) {
+        return 'submit_rate_limited';
+    }
+    if (lower.includes('already processed transaction')) return 'submit_victim_already_processed';
+    return 'submit_failed_other';
+}
+
+function isExpiredBlockhashSubmissionError(error: string | undefined): boolean {
+    if (!error) return false;
+    return error.toLowerCase().includes('expired blockhash');
+}
+
+function buildFallbackBundleWithoutVictim(bundle: BundleRequest): BundleRequest | null {
+    if (!bundle.transactions || bundle.transactions.length < 2) return null;
+    const first = bundle.transactions[0];
+    if (!first || first.signers.length !== 0) return null;
+    return {
+        transactions: bundle.transactions.slice(1),
+        tipLamports: bundle.tipLamports,
+    };
 }
 
 function validateCandidateSanity(
@@ -312,16 +461,18 @@ function dlmmBinArrays(snapshot: SimulationSnapshot): { indexes: number[]; array
     };
 }
 
-function mkShadowLedger(basePath: string | undefined): ShadowLedger {
+function mkShadowLedger(basePath: string | undefined, mode: 'shadow' | 'live'): ShadowLedger {
     const runId = `${Date.now()}-${process.pid}`;
     const dir = basePath ? path.resolve(basePath) : path.resolve(process.cwd(), 'data/evidence');
     mkdirSync(dir, { recursive: true });
+    const prefix = `${mode}-cross-venue`;
 
     return {
+        mode,
         runId,
-        jsonlPath: path.join(dir, `shadow-cross-venue-${runId}.jsonl`),
-        opportunitiesJsonlPath: path.join(dir, `shadow-cross-venue-opportunities-${runId}.jsonl`),
-        latestPath: path.join(dir, 'shadow-cross-venue-latest.json'),
+        jsonlPath: path.join(dir, `${prefix}-${runId}.jsonl`),
+        opportunitiesJsonlPath: path.join(dir, `${prefix}-opportunities-${runId}.jsonl`),
+        latestPath: path.join(dir, `${prefix}-latest.json`),
         netSamplesLamports: [],
         lastSummaryWriteMs: 0,
     };
@@ -339,6 +490,7 @@ function writeLatestShadowSummary(stats: BackrunStats, ledger: ShadowLedger): vo
     const payload = {
         updatedAt: nowIso(),
         runId: ledger.runId,
+        mode: ledger.mode,
         strategyMode: stats.strategyMode,
         counters: {
             shredTxsReceived: stats.shredTxsReceived.toString(),
@@ -349,6 +501,7 @@ function writeLatestShadowSummary(stats: BackrunStats, ledger: ShadowLedger): vo
             bundlesBuilt: stats.bundlesBuilt.toString(),
             bundlesSubmitted: stats.bundlesSubmitted.toString(),
             totalProfitLamports: stats.totalProfitLamports.toString(),
+            predictedProfitLamports: stats.totalProfitLamports.toString(),
             shadowBuildFailures: stats.shadowBuildFailures.toString(),
         },
         netPnl: {
@@ -426,6 +579,30 @@ export function createBackrunEngine(config: BackrunConfig) {
     const haircutBps = config.conservativeHaircutBps ?? 30;
     const maxNetToInputBps = BigInt(Math.max(1, config.maxNetToInputBps ?? 20_000));
     const maxAbsoluteNetLamports = config.maxAbsoluteNetLamports ?? 5_000_000_000n;
+    const canaryMaxInputLamports = config.canaryMaxInputLamports ?? 0n;
+    const canaryMaxSubmissionsPerHour = Math.max(0, config.canaryMaxSubmissionsPerHour ?? 0);
+    let canaryWindowStartMs = Date.now();
+    let canarySubmissionsInWindow = 0;
+
+    function reserveCanarySubmission(inputLamports: bigint): string | null {
+        if (config.dryRun) return null;
+        if (canaryMaxInputLamports > 0n && inputLamports > canaryMaxInputLamports) {
+            return 'canary_input_cap';
+        }
+        if (canaryMaxSubmissionsPerHour <= 0) return null;
+
+        const nowMs = Date.now();
+        if (nowMs - canaryWindowStartMs >= 3_600_000) {
+            canaryWindowStartMs = nowMs;
+            canarySubmissionsInWindow = 0;
+        }
+        if (canarySubmissionsInWindow >= canaryMaxSubmissionsPerHour) {
+            return 'canary_rate_cap';
+        }
+
+        canarySubmissionsInWindow++;
+        return null;
+    }
 
     const pairIndex = new PairIndex(config.lifecycle, {
         includeTopologyFrozen: config.includeTopologyFrozenPools ?? false,
@@ -475,8 +652,10 @@ export function createBackrunEngine(config: BackrunConfig) {
         globalConfigCache: config.globalConfigCache,
         strictSlotConsistency: config.strictSlotConsistency ?? true,
     };
+    const includeVictimTx = config.includeVictimTx ?? true;
 
-    const shadowLedger = mkShadowLedger(config.shadowLedgerPath);
+    const runMode: 'shadow' | 'live' = config.dryRun ? 'shadow' : 'live';
+    const shadowLedger = mkShadowLedger(config.shadowLedgerPath, runMode);
     stats.shadowFiles = {
         jsonl: shadowLedger.jsonlPath,
         opportunitiesJsonl: shadowLedger.opportunitiesJsonlPath,
@@ -484,7 +663,6 @@ export function createBackrunEngine(config: BackrunConfig) {
     };
 
     function maybeWriteShadowSummary(force = false): void {
-        if (!config.dryRun) return;
         const now = Date.now();
         if (!force && now - shadowLedger.lastSummaryWriteMs < 2000) return;
         writeLatestShadowSummary(stats, shadowLedger);
@@ -493,10 +671,12 @@ export function createBackrunEngine(config: BackrunConfig) {
     function recordSkip(reason: string, update: TxUpdate, pairKey?: string): void {
         bumpReason(stats.skipReasons, reason);
         appendShadowRecord(shadowLedger, {
+            event: 'skip',
             ts: nowIso(),
             slot: update.slot,
             signatureHex: toHex(update.signature),
             strategy: strategyMode,
+            runMode,
             pairKey,
             reason,
         });
@@ -548,14 +728,18 @@ export function createBackrunEngine(config: BackrunConfig) {
         for (const leg of swapLegs.legs) {
             stats.swapsDetected++;
             if (strategyMode === 'legacy_cpmm_same_pool') {
-                processLegacyCpmmSamePool(leg, update);
+                processLegacyCpmmSamePool(leg, update, decoded.tx as any);
             } else {
-                processCrossVenuePsDlmm(leg, update);
+                processCrossVenuePsDlmm(leg, update, decoded.tx as any);
             }
         }
     }
 
-    function processCrossVenuePsDlmm(leg: SwapLeg, update: TxUpdate): void {
+    function processCrossVenuePsDlmm(
+        leg: SwapLeg,
+        update: TxUpdate,
+        decodedTx?: { accountKeys: Uint8Array[]; instructions?: import('../types.js').CompiledInstruction[] },
+    ): void {
         const victimEntry = config.poolCache.get(leg.pool);
         if (!victimEntry || victimEntry.state.venue !== VenueId.PumpSwap) {
             return;
@@ -620,6 +804,9 @@ export function createBackrunEngine(config: BackrunConfig) {
         }
 
         const adaptiveSizes = [...SIZE_CANDIDATES];
+        const victimPumpRemaining = decodedTx
+            ? getPumpRemainingAccountsFromVictim(decodedTx, update.message, leg)
+            : null;
         let best: CandidateEval | null = null;
         let bestPoolHex: string | undefined;
         let hadUsableCounterpart = false;
@@ -814,7 +1001,8 @@ export function createBackrunEngine(config: BackrunConfig) {
         }
         const netToInputBps = (best.netLamports * 10000n) / best.inputLamports;
 
-        const slipMul = BigInt(10000 - config.slippageBps);
+        const effectiveSlippageBps = config.executionSlippageBps ?? config.slippageBps;
+        const slipMul = BigInt(10000 - effectiveSlippageBps);
         const swap1MinOut = (best.swap1.outputAmount * slipMul) / 10000n;
         if (swap1MinOut <= 0n) {
             recordSkip('swap1_min_out_zero', update, counterpart.pairKey);
@@ -837,6 +1025,7 @@ export function createBackrunEngine(config: BackrunConfig) {
             minOutput: swap1MinOut,
             pool: best.swap1Pool,
             dlmm: best.swap1Pool.venue === VenueId.MeteoraDlmm ? best.dlmmMeta : undefined,
+            pumpRemainingAccounts: best.swap1Pool.venue === VenueId.PumpSwap ? victimPumpRemaining ?? undefined : undefined,
         };
 
         const swap2Params: SwapParams = {
@@ -847,6 +1036,7 @@ export function createBackrunEngine(config: BackrunConfig) {
             minOutput: swap2MinOut,
             pool: best.swap2Pool,
             dlmm: best.swap2Pool.venue === VenueId.MeteoraDlmm ? best.dlmmMeta : undefined,
+            pumpRemainingAccounts: best.swap2Pool.venue === VenueId.PumpSwap ? victimPumpRemaining ?? undefined : undefined,
         };
 
         if (
@@ -859,10 +1049,14 @@ export function createBackrunEngine(config: BackrunConfig) {
             return;
         }
 
-        const victimTx = buildVictimTxBytes(update);
-        if (!victimTx.ok) {
-            recordSkip(victimTx.reason, update, counterpart.pairKey);
-            return;
+        let victimTxBytes: Uint8Array | undefined;
+        if (includeVictimTx) {
+            const victimTx = buildVictimTxBytes(update);
+            if (!victimTx.ok) {
+                recordSkip(victimTx.reason, update, counterpart.pairKey);
+                return;
+            }
+            victimTxBytes = victimTx.bytes;
         }
 
         const bundleBuildStart = process.hrtime.bigint();
@@ -872,7 +1066,7 @@ export function createBackrunEngine(config: BackrunConfig) {
             config.payerKeypair,
             bundleConfig,
             config.getRecentBlockhash(),
-            victimTx.bytes,
+            victimTxBytes,
         );
         const bundleBuildUs = (process.hrtime.bigint() - bundleBuildStart) / 1000n;
         pushLatencySample(stats.latencyUs.bundleBuild, bundleBuildUs);
@@ -880,10 +1074,12 @@ export function createBackrunEngine(config: BackrunConfig) {
         if (!built.success || !built.bundle) {
             stats.shadowBuildFailures++;
             const failedOpportunityRecord: ShadowRecord = {
+                event: 'opportunity',
                 ts: nowIso(),
                 slot: update.slot,
                 signatureHex: toHex(update.signature),
                 strategy: strategyMode,
+                runMode,
                 pairKey: counterpart.pairKey,
                 counterpartPool: bestPoolHex,
                 reason: 'bundle_build_failed',
@@ -892,6 +1088,11 @@ export function createBackrunEngine(config: BackrunConfig) {
                 bestNetLamports: best.netLamports.toString(),
                 bestGrossLamports: best.grossLamports.toString(),
                 netToInputBps: netToInputBps.toString(),
+                tipLamports: config.tipLamports.toString(),
+                gasCostLamports: gasCostLamports.toString(),
+                haircutLamports: best.haircutLamports.toString(),
+                swap1MinOutLamports: swap1MinOut.toString(),
+                swap2MinOutLamports: swap2MinOut.toString(),
                 buildSuccess: false,
                 buildError: built.error,
             };
@@ -904,10 +1105,12 @@ export function createBackrunEngine(config: BackrunConfig) {
         stats.bundlesBuilt++;
 
         const landedOpportunityRecord: ShadowRecord = {
+            event: 'opportunity',
             ts: nowIso(),
             slot: update.slot,
             signatureHex: toHex(update.signature),
             strategy: strategyMode,
+            runMode,
             pairKey: counterpart.pairKey,
             counterpartPool: bestPoolHex,
             route: best.venueRoute,
@@ -915,6 +1118,11 @@ export function createBackrunEngine(config: BackrunConfig) {
             bestNetLamports: best.netLamports.toString(),
             bestGrossLamports: best.grossLamports.toString(),
             netToInputBps: netToInputBps.toString(),
+            tipLamports: config.tipLamports.toString(),
+            gasCostLamports: gasCostLamports.toString(),
+            haircutLamports: best.haircutLamports.toString(),
+            swap1MinOutLamports: swap1MinOut.toString(),
+            swap2MinOutLamports: swap2MinOut.toString(),
             candidateCount: SIZE_CANDIDATES.length,
             buildSuccess: true,
         };
@@ -938,17 +1146,172 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         appendShadowRecord(shadowLedger, landedOpportunityRecord);
         appendOpportunityRecord(shadowLedger, landedOpportunityRecord);
+        const builtBundle = built.bundle;
 
-        config.jitoClient.submitWithRetry(built.bundle).then(submitResult => {
-            if (!submitResult.submitted) return;
+        const canaryBlock = reserveCanarySubmission(best.inputLamports);
+        if (canaryBlock) {
+            recordSkip(canaryBlock, update, counterpart.pairKey);
+            return;
+        }
+
+        void (async () => {
+            let submitBundle = builtBundle;
+            if (config.refreshRecentBlockhash) {
+                const refreshed = await config.refreshRecentBlockhash();
+                if (!refreshed) {
+                    bumpReason(stats.skipReasons, 'submit_blockhash_refresh_failed');
+                    maybeWriteShadowSummary();
+                    return;
+                }
+                const rebuilt = buildBundle(
+                    swap1Params,
+                    swap2Params,
+                    config.payerKeypair,
+                    bundleConfig,
+                    config.getRecentBlockhash(),
+                    victimTxBytes,
+                );
+                if (rebuilt.success && rebuilt.bundle) {
+                    submitBundle = rebuilt.bundle;
+                } else {
+                    bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                    maybeWriteShadowSummary();
+                    return;
+                }
+            }
+
+            const primary = await config.jitoClient.submitWithRetry(submitBundle);
+            appendShadowRecord(shadowLedger, {
+                event: 'submit_result',
+                ts: nowIso(),
+                slot: update.slot,
+                signatureHex: toHex(update.signature),
+                strategy: strategyMode,
+                runMode,
+                pairKey: counterpart.pairKey,
+                counterpartPool: bestPoolHex,
+                route: best!.venueRoute,
+                candidateInputLamports: best!.inputLamports.toString(),
+                bestNetLamports: best!.netLamports.toString(),
+                bestGrossLamports: best!.grossLamports.toString(),
+                netToInputBps: netToInputBps.toString(),
+                tipLamports: config.tipLamports.toString(),
+                gasCostLamports: gasCostLamports.toString(),
+                haircutLamports: best!.haircutLamports.toString(),
+                swap1MinOutLamports: swap1MinOut.toString(),
+                swap2MinOutLamports: swap2MinOut.toString(),
+                submitOk: primary.submitted,
+                bundleId: primary.bundleId,
+                submitError: primary.error,
+                submitLatencyMs: primary.latencyMs,
+                submitMode: includeVictimTx ? 'primary_with_victim' : 'fallback_without_victim',
+            });
+
+            let finalResult = primary;
+            if (!finalResult.submitted && isExpiredBlockhashSubmissionError(finalResult.error)) {
+                await config.refreshRecentBlockhash?.(true);
+                const rebuilt = buildBundle(
+                    swap1Params,
+                    swap2Params,
+                    config.payerKeypair,
+                    bundleConfig,
+                    config.getRecentBlockhash(),
+                    victimTxBytes,
+                );
+                if (rebuilt.success && rebuilt.bundle) {
+                    const retried = await config.jitoClient.submitWithRetry(rebuilt.bundle);
+                    appendShadowRecord(shadowLedger, {
+                        event: 'submit_result',
+                        ts: nowIso(),
+                        slot: update.slot,
+                        signatureHex: toHex(update.signature),
+                        strategy: strategyMode,
+                        runMode,
+                        pairKey: counterpart.pairKey,
+                        counterpartPool: bestPoolHex,
+                        route: best!.venueRoute,
+                        candidateInputLamports: best!.inputLamports.toString(),
+                        bestNetLamports: best!.netLamports.toString(),
+                        bestGrossLamports: best!.grossLamports.toString(),
+                        netToInputBps: netToInputBps.toString(),
+                        tipLamports: config.tipLamports.toString(),
+                        gasCostLamports: gasCostLamports.toString(),
+                        haircutLamports: best!.haircutLamports.toString(),
+                        swap1MinOutLamports: swap1MinOut.toString(),
+                        swap2MinOutLamports: swap2MinOut.toString(),
+                        submitOk: retried.submitted,
+                        bundleId: retried.bundleId,
+                        submitError: retried.error,
+                        submitLatencyMs: retried.latencyMs,
+                        submitMode: 'retry_fresh_blockhash',
+                    });
+                    finalResult = retried;
+                    bumpReason(
+                        stats.skipReasons,
+                        retried.submitted ? 'submit_retry_fresh_blockhash_success' : 'submit_retry_fresh_blockhash_failed',
+                    );
+                } else {
+                    bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                }
+            }
+            if (includeVictimTx && !primary.submitted && isAlreadyProcessedSubmissionError(primary.error)) {
+                const fallbackBundle = buildFallbackBundleWithoutVictim(builtBundle);
+                if (fallbackBundle) {
+                    bumpReason(stats.skipReasons, 'submit_victim_already_processed');
+                    const fallback = await config.jitoClient.submitWithRetry(fallbackBundle);
+                    appendShadowRecord(shadowLedger, {
+                        event: 'submit_result',
+                        ts: nowIso(),
+                        slot: update.slot,
+                        signatureHex: toHex(update.signature),
+                        strategy: strategyMode,
+                        runMode,
+                        pairKey: counterpart.pairKey,
+                        counterpartPool: bestPoolHex,
+                        route: best!.venueRoute,
+                        candidateInputLamports: best!.inputLamports.toString(),
+                        bestNetLamports: best!.netLamports.toString(),
+                        bestGrossLamports: best!.grossLamports.toString(),
+                        netToInputBps: netToInputBps.toString(),
+                        tipLamports: config.tipLamports.toString(),
+                        gasCostLamports: gasCostLamports.toString(),
+                        haircutLamports: best!.haircutLamports.toString(),
+                        swap1MinOutLamports: swap1MinOut.toString(),
+                        swap2MinOutLamports: swap2MinOut.toString(),
+                        submitOk: fallback.submitted,
+                        bundleId: fallback.bundleId,
+                        submitError: fallback.error,
+                        submitLatencyMs: fallback.latencyMs,
+                        submitMode: 'fallback_without_victim',
+                    });
+                    finalResult = fallback;
+                    bumpReason(stats.skipReasons, fallback.submitted ? 'submit_fallback_success' : 'submit_fallback_failed');
+                }
+            }
+
+            maybeWriteShadowSummary();
+            if (!finalResult.submitted) {
+                bumpReason(stats.skipReasons, 'submit_failed');
+                const classified = classifySubmitError(finalResult.error);
+                if (classified) {
+                    bumpReason(stats.skipReasons, classified);
+                }
+                maybeWriteShadowSummary();
+                return;
+            }
             stats.bundlesSubmitted++;
             stats.totalProfitLamports += best!.netLamports;
-        }).catch(() => {
+            maybeWriteShadowSummary();
+        })().catch(() => {
             // tracked by submit client
         });
     }
 
-    function processLegacyCpmmSamePool(leg: SwapLeg, update: TxUpdate): void {
+    function processLegacyCpmmSamePool(
+        leg: SwapLeg,
+        update: TxUpdate,
+        decodedTx?: { accountKeys: Uint8Array[]; instructions?: import('../types.js').CompiledInstruction[] },
+    ): void {
         const poolEntry = config.poolCache.get(leg.pool);
         if (!poolEntry) return;
 
@@ -1037,7 +1400,8 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         if (bestNet < config.minProfitLamports) return;
 
-        const slippageMul = BigInt(10000 - config.slippageBps);
+        const effectiveSlippageBps = config.executionSlippageBps ?? config.slippageBps;
+        const slippageMul = BigInt(10000 - effectiveSlippageBps);
         const swap1MinOut = (bestSwap1Out * slippageMul) / 10000n;
         if (swap1MinOut <= 0n) {
             recordSkip('swap1_min_out_zero', update);
@@ -1075,10 +1439,14 @@ export function createBackrunEngine(config: BackrunConfig) {
             return;
         }
 
-        const victimTx = buildVictimTxBytes(update);
-        if (!victimTx.ok) {
-            recordSkip(victimTx.reason, update);
-            return;
+        let victimTxBytes: Uint8Array | undefined;
+        if (includeVictimTx) {
+            const victimTx = buildVictimTxBytes(update);
+            if (!victimTx.ok) {
+                recordSkip(victimTx.reason, update);
+                return;
+            }
+            victimTxBytes = victimTx.bytes;
         }
 
         const result = buildBundle(
@@ -1087,10 +1455,11 @@ export function createBackrunEngine(config: BackrunConfig) {
             config.payerKeypair,
             bundleConfig,
             config.getRecentBlockhash(),
-            victimTx.bytes,
+            victimTxBytes,
         );
 
         if (!result.success || !result.bundle) return;
+        const builtBundle = result.bundle;
 
         stats.opportunitiesFound++;
         stats.bundlesBuilt++;
@@ -1101,11 +1470,84 @@ export function createBackrunEngine(config: BackrunConfig) {
             return;
         }
 
-        config.jitoClient.submitWithRetry(result.bundle).then(submitResult => {
-            if (!submitResult.submitted) return;
+        const canaryBlock = reserveCanarySubmission(bestInput);
+        if (canaryBlock) {
+            recordSkip(canaryBlock, update);
+            return;
+        }
+
+        void (async () => {
+            let submitBundle = builtBundle;
+            if (config.refreshRecentBlockhash) {
+                const refreshed = await config.refreshRecentBlockhash();
+                if (!refreshed) {
+                    bumpReason(stats.skipReasons, 'submit_blockhash_refresh_failed');
+                    return;
+                }
+                const victimPumpRemaining = decodedTx
+                    ? getPumpRemainingAccountsFromVictim(decodedTx, update.message, leg)
+                    : null;
+                const rebuiltSwap1: SwapParams = { ...swap1Params, pumpRemainingAccounts: victimPumpRemaining ?? undefined };
+                const rebuiltSwap2: SwapParams = { ...swap2Params, pumpRemainingAccounts: victimPumpRemaining ?? undefined };
+                const rebuilt = buildBundle(
+                    rebuiltSwap1,
+                    rebuiltSwap2,
+                    config.payerKeypair,
+                    bundleConfig,
+                    config.getRecentBlockhash(),
+                    victimTxBytes,
+                );
+                if (rebuilt.success && rebuilt.bundle) {
+                    submitBundle = rebuilt.bundle;
+                } else {
+                    bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                    return;
+                }
+            }
+
+            const primary = await config.jitoClient.submitWithRetry(submitBundle);
+            let finalResult = primary;
+            if (!finalResult.submitted && isExpiredBlockhashSubmissionError(finalResult.error)) {
+                await config.refreshRecentBlockhash?.(true);
+                const rebuilt = buildBundle(
+                    swap1Params,
+                    swap2Params,
+                    config.payerKeypair,
+                    bundleConfig,
+                    config.getRecentBlockhash(),
+                    victimTxBytes,
+                );
+                if (rebuilt.success && rebuilt.bundle) {
+                    const retried = await config.jitoClient.submitWithRetry(rebuilt.bundle);
+                    finalResult = retried;
+                    bumpReason(
+                        stats.skipReasons,
+                        retried.submitted ? 'submit_retry_fresh_blockhash_success' : 'submit_retry_fresh_blockhash_failed',
+                    );
+                } else {
+                    bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                }
+            }
+            if (!primary.submitted && isAlreadyProcessedSubmissionError(primary.error)) {
+                const fallbackBundle = buildFallbackBundleWithoutVictim(builtBundle);
+                if (fallbackBundle) {
+                    bumpReason(stats.skipReasons, 'submit_victim_already_processed');
+                    const fallback = await config.jitoClient.submitWithRetry(fallbackBundle);
+                    finalResult = fallback;
+                    bumpReason(stats.skipReasons, fallback.submitted ? 'submit_fallback_success' : 'submit_fallback_failed');
+                }
+            }
+            if (!finalResult.submitted) {
+                bumpReason(stats.skipReasons, 'submit_failed');
+                const classified = classifySubmitError(finalResult.error);
+                if (classified) {
+                    bumpReason(stats.skipReasons, classified);
+                }
+                return;
+            }
             stats.bundlesSubmitted++;
             stats.totalProfitLamports += bestNet;
-        }).catch(() => {
+        })().catch(() => {
             // tracked by submit client
         });
     }

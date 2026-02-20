@@ -59,6 +59,8 @@ const RV4_SWAP_BASE_OUT_V2 = 17;
 
 // Meteora DLMM swap discriminator (global:swap)
 const DLMM_SWAP_DISC = Buffer.from('f8c69e91e17587c8', 'hex');
+const WSOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
+const MINT_PROGRAM_OVERRIDES = new Map<string, PublicKey>();
 
 // Well-known program IDs
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -129,6 +131,12 @@ export interface DlmmSwapMeta {
     binArrays?: Uint8Array[];
 }
 
+export interface PumpRemainingAccountMeta {
+    pubkey: Uint8Array;
+    isSigner: boolean;
+    isWritable: boolean;
+}
+
 /** Parameters for a single swap instruction */
 export interface SwapParams {
     direction: SwapDirection;
@@ -136,23 +144,47 @@ export interface SwapParams {
     minOutput: bigint;
     pool: PumpSwapPool | RaydiumV4Pool | MeteoraDlmmPool;
     dlmm?: DlmmSwapMeta;
+    pumpRemainingAccounts?: PumpRemainingAccountMeta[];
+}
+
+export function setMintProgramOverride(
+    mint: Uint8Array | PublicKey,
+    tokenProgram: Uint8Array | PublicKey,
+): void {
+    const mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
+    const programPk = tokenProgram instanceof PublicKey ? tokenProgram : new PublicKey(tokenProgram);
+    MINT_PROGRAM_OVERRIDES.set(mintPk.toBase58(), programPk);
 }
 
 // ============================================================================
 // ATA Derivation
 // ============================================================================
 
-function deriveATA(owner: PublicKey, mint: PublicKey): PublicKey {
+function deriveATA(owner: PublicKey, mint: PublicKey, tokenProgram: PublicKey): PublicKey {
     const [ata] = PublicKey.findProgramAddressSync(
-        [owner.toBytes(), TOKEN_PROGRAM.toBytes(), mint.toBytes()],
+        [owner.toBytes(), tokenProgram.toBytes(), mint.toBytes()],
         ASSOC_TOKEN_PROGRAM,
     );
     return ata;
 }
 
+interface UserAtaSpec {
+    mint: PublicKey;
+    tokenProgram: PublicKey;
+}
+
 function toPublicKey(bytes: Uint8Array | undefined, fallback: PublicKey): PublicKey {
     if (!bytes || bytes.length !== 32) return fallback;
     return new PublicKey(bytes);
+}
+
+function defaultTokenProgramForMint(mint: PublicKey): PublicKey {
+    const override = MINT_PROGRAM_OVERRIDES.get(mint.toBase58());
+    if (override) return override;
+    if (mint.equals(WSOL_MINT)) return TOKEN_PROGRAM;
+    // Pump.fun mints (suffix "pump") are Token-2022 mints in current flow.
+    if (mint.toBase58().endsWith('pump')) return TOKEN_2022_PROGRAM;
+    return TOKEN_PROGRAM;
 }
 
 function i64Le(index: number): Buffer {
@@ -183,8 +215,10 @@ function buildPumpSwapSwapIx(
     const quoteMint = new PublicKey(pool.quoteMint);
     const baseVault = new PublicKey(pool.baseVault);
     const quoteVault = new PublicKey(pool.quoteVault);
-    const userBaseATA = deriveATA(payer, baseMint);
-    const userQuoteATA = deriveATA(payer, quoteMint);
+    const baseTokenProgram = defaultTokenProgramForMint(baseMint);
+    const quoteTokenProgram = defaultTokenProgramForMint(quoteMint);
+    const userBaseATA = deriveATA(payer, baseMint, baseTokenProgram);
+    const userQuoteATA = deriveATA(payer, quoteMint, quoteTokenProgram);
 
     // Build instruction data (24 bytes)
     const data = Buffer.alloc(24);
@@ -200,7 +234,7 @@ function buildPumpSwapSwapIx(
         data.writeBigUInt64LE(params.minOutput, 16);   // min quote out
     }
 
-    // Account ordering per PumpSwap IDL
+    // Core account ordering per PumpSwap IDL
     const keys = [
         { pubkey: poolPk, isSigner: false, isWritable: true },
         { pubkey: payer, isSigner: true, isWritable: true },
@@ -211,13 +245,29 @@ function buildPumpSwapSwapIx(
         { pubkey: userQuoteATA, isSigner: false, isWritable: true },
         { pubkey: baseVault, isSigner: false, isWritable: true },
         { pubkey: quoteVault, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_2022_PROGRAM, isSigner: false, isWritable: false },
-        { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
-        { pubkey: ASSOC_TOKEN_PROGRAM, isSigner: false, isWritable: false },
-        { pubkey: getPumpEventAuthority(), isSigner: false, isWritable: false },
-        { pubkey: PUMPSWAP_PROGRAM, isSigner: false, isWritable: false },
     ];
+
+    // Prefer victim-observed trailing accounts to stay aligned with evolving PumpSwap IDL.
+    if (params.pumpRemainingAccounts && params.pumpRemainingAccounts.length > 0) {
+        for (const meta of params.pumpRemainingAccounts) {
+            if (!meta?.pubkey || meta.pubkey.length !== 32) continue;
+            keys.push({
+                pubkey: new PublicKey(meta.pubkey),
+                isSigner: meta.isSigner,
+                isWritable: meta.isWritable,
+            });
+        }
+    } else {
+        // Backward-compatible fallback for legacy account layout.
+        keys.push(
+            { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
+            { pubkey: TOKEN_2022_PROGRAM, isSigner: false, isWritable: false },
+            { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+            { pubkey: ASSOC_TOKEN_PROGRAM, isSigner: false, isWritable: false },
+            { pubkey: getPumpEventAuthority(), isSigner: false, isWritable: false },
+            { pubkey: PUMPSWAP_PROGRAM, isSigner: false, isWritable: false },
+        );
+    }
 
     return new TransactionInstruction({
         programId: PUMPSWAP_PROGRAM,
@@ -241,8 +291,8 @@ function buildRaydiumV4SwapIx(
     const quoteVault = new PublicKey(pool.quoteVault);
     const ammAuthority = getAmmAuthority(pool.nonce);
 
-    const userBaseATA = deriveATA(payer, baseMint);
-    const userQuoteATA = deriveATA(payer, quoteMint);
+    const userBaseATA = deriveATA(payer, baseMint, TOKEN_PROGRAM);
+    const userQuoteATA = deriveATA(payer, quoteMint, TOKEN_PROGRAM);
 
     let userSource: PublicKey;
     let userDest: PublicKey;
@@ -295,9 +345,11 @@ export function buildMeteoraDlmmSwapIx(
     const tokenYMint = new PublicKey(pool.tokenYMint);
     const reserveX = new PublicKey(pool.vaultX);
     const reserveY = new PublicKey(pool.vaultY);
+    const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, defaultTokenProgramForMint(tokenXMint));
+    const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, defaultTokenProgramForMint(tokenYMint));
 
-    const userTokenX = deriveATA(payer, tokenXMint);
-    const userTokenY = deriveATA(payer, tokenYMint);
+    const userTokenX = deriveATA(payer, tokenXMint, tokenXProgram);
+    const userTokenY = deriveATA(payer, tokenYMint, tokenYProgram);
 
     // AtoB means X->Y, BtoA means Y->X in this codebase.
     const swapForY = params.direction === Dir.AtoB;
@@ -308,8 +360,6 @@ export function buildMeteoraDlmmSwapIx(
     const eventAuthority = toPublicKey(params.dlmm?.eventAuthority, getDlmmEventAuthority());
     const bitmapExtension = toPublicKey(params.dlmm?.binArrayBitmapExtension, SYSTEM_PROGRAM);
     const hostFeeIn = toPublicKey(params.dlmm?.hostFeeIn, userTokenIn);
-    const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, TOKEN_PROGRAM);
-    const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, TOKEN_PROGRAM);
 
     const data = Buffer.alloc(25);
     DLMM_SWAP_DISC.copy(data, 0);
@@ -365,6 +415,55 @@ function buildSwapIx(payer: PublicKey, params: SwapParams): TransactionInstructi
     return buildPumpSwapSwapIx(payer, params);
 }
 
+function collectUserAtaSpecs(params: SwapParams): UserAtaSpec[] {
+    if (params.pool.venue === VenueId.MeteoraDlmm) {
+        const pool = params.pool as MeteoraDlmmPool;
+        const tokenXMint = new PublicKey(pool.tokenXMint);
+        const tokenYMint = new PublicKey(pool.tokenYMint);
+        const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, defaultTokenProgramForMint(tokenXMint));
+        const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, defaultTokenProgramForMint(tokenYMint));
+        return [
+            { mint: tokenXMint, tokenProgram: tokenXProgram },
+            { mint: tokenYMint, tokenProgram: tokenYProgram },
+        ];
+    }
+
+    const pool = params.pool as PumpSwapPool | RaydiumV4Pool;
+    const baseMint = new PublicKey(pool.baseMint);
+    const quoteMint = new PublicKey(pool.quoteMint);
+    const baseTokenProgram = params.pool.venue === VenueId.PumpSwap
+        ? defaultTokenProgramForMint(baseMint)
+        : TOKEN_PROGRAM;
+    const quoteTokenProgram = params.pool.venue === VenueId.PumpSwap
+        ? defaultTokenProgramForMint(quoteMint)
+        : TOKEN_PROGRAM;
+    return [
+        { mint: baseMint, tokenProgram: baseTokenProgram },
+        { mint: quoteMint, tokenProgram: quoteTokenProgram },
+    ];
+}
+
+function buildCreateAtaIdempotentIx(
+    payer: PublicKey,
+    owner: PublicKey,
+    mint: PublicKey,
+    tokenProgram: PublicKey,
+): TransactionInstruction {
+    const ata = deriveATA(owner, mint, tokenProgram);
+    return new TransactionInstruction({
+        programId: ASSOC_TOKEN_PROGRAM,
+        keys: [
+            { pubkey: payer, isSigner: true, isWritable: true },
+            { pubkey: ata, isSigner: false, isWritable: true },
+            { pubkey: owner, isSigner: false, isWritable: false },
+            { pubkey: mint, isSigner: false, isWritable: false },
+            { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
+            { pubkey: tokenProgram, isSigner: false, isWritable: false },
+        ],
+        data: Buffer.from([1]), // create_idempotent
+    });
+}
+
 // ============================================================================
 // Bundle Assembly
 // ============================================================================
@@ -394,6 +493,24 @@ export function buildBundle(
                 ComputeBudgetProgram.setComputeUnitPrice({
                     microLamports: Number(config.computeUnitPrice),
                 }),
+            );
+        }
+
+        // Ensure user token accounts exist for all swap mints.
+        const ataSpecs = [...collectUserAtaSpecs(swap1), ...collectUserAtaSpecs(swap2)];
+        const seenAtas = new Set<string>();
+        for (const spec of ataSpecs) {
+            const ata = deriveATA(payer.publicKey, spec.mint, spec.tokenProgram);
+            const ataKey = ata.toBase58();
+            if (seenAtas.has(ataKey)) continue;
+            seenAtas.add(ataKey);
+            instructions.push(
+                buildCreateAtaIdempotentIx(
+                    payer.publicKey,
+                    payer.publicKey,
+                    spec.mint,
+                    spec.tokenProgram,
+                ),
             );
         }
 

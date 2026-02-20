@@ -47,6 +47,8 @@ const ALT_METADATA_SIZE = 56;
 // Batch settings for subscription updates
 const BATCH_INTERVAL_MS = 50;
 const BATCH_SIZE_THRESHOLD = 20;
+const ALT_GRPC_LOG_LEVEL = (process.env.ALT_GRPC_LOG_LEVEL ?? 'info').toLowerCase();
+const ALT_GRPC_SUMMARY_INTERVAL_MS = Number(process.env.ALT_GRPC_SUMMARY_INTERVAL_MS ?? '30000');
 
 // ============================================================================
 // ALT ACCOUNT DECODER
@@ -156,6 +158,8 @@ export interface AltGrpcFetcher {
 
 export function createAltGrpcFetcher(config: AltGrpcFetcherConfig): AltGrpcFetcher {
     const { endpoint, altCache, hotlistPath, onAltFetched, onError } = config;
+    const debugLogs = ALT_GRPC_LOG_LEVEL === 'debug';
+    const infoLogs = ALT_GRPC_LOG_LEVEL !== 'silent';
 
     // State
     let running = false;
@@ -166,6 +170,7 @@ export function createAltGrpcFetcher(config: AltGrpcFetcherConfig): AltGrpcFetch
     const subscribedAlts: Set<string> = new Set();  // hex keys already subscribed
     const pendingAlts: Set<string> = new Set();     // hex keys waiting to subscribe
     let batchTimer: NodeJS.Timeout | null = null;
+    let summaryTimer: NodeJS.Timeout | null = null;
 
     // Metrics
     let altsRequested = 0;
@@ -209,10 +214,21 @@ export function createAltGrpcFetcher(config: AltGrpcFetcherConfig): AltGrpcFetch
                 console.error(`[altGrpc] Stream error: ${err?.message ?? err}`);
             });
             subscription!.on('end', () => {
-                console.log('[altGrpc] Stream ended');
+                if (infoLogs) console.log('[altGrpc] Stream ended');
             });
 
-            console.log(`[altGrpc] Connected to ${endpoint}`);
+            if (infoLogs) {
+                console.log(`[altGrpc] Connected to ${endpoint}`);
+            }
+            if (infoLogs && ALT_GRPC_SUMMARY_INTERVAL_MS > 0) {
+                summaryTimer = setInterval(() => {
+                    console.log(
+                        `[altGrpc] stats subscribed=${subscribedAlts.size} pending=${pendingAlts.size} ` +
+                        `requested=${altsRequested} fetched=${altsFetched} failed=${altsFailed}`,
+                    );
+                }, ALT_GRPC_SUMMARY_INTERVAL_MS);
+                summaryTimer.unref();
+            }
 
         } catch (err: any) {
             console.error(`[altGrpc] Connection failed: ${err?.message ?? err}`);
@@ -227,6 +243,10 @@ export function createAltGrpcFetcher(config: AltGrpcFetcherConfig): AltGrpcFetch
         if (batchTimer) {
             clearTimeout(batchTimer);
             batchTimer = null;
+        }
+        if (summaryTimer) {
+            clearInterval(summaryTimer);
+            summaryTimer = null;
         }
 
         if (subscription) {
@@ -311,7 +331,9 @@ export function createAltGrpcFetcher(config: AltGrpcFetcherConfig): AltGrpcFetch
         };
 
         subscription.write(subscribeRequest);
-        console.log(`[altGrpc] Subscribed to ${subscribedAlts.size} ALT accounts`);
+        if (debugLogs) {
+            console.log(`[altGrpc] Subscribed to ${subscribedAlts.size} ALT accounts`);
+        }
     }
 
     // ========================================================================
@@ -405,12 +427,15 @@ export function wireAltGrpcFetcher(
     grpcEndpoint: string = '127.0.0.1:10000',
     hotlistPath?: string
 ): AltGrpcFetcher {
+    const debugLogs = ALT_GRPC_LOG_LEVEL === 'debug';
     const fetcher = createAltGrpcFetcher({
         endpoint: grpcEndpoint,
         altCache,
         hotlistPath,
         onAltFetched: (pubkey, count) => {
-            console.log(`[altGrpc] Fetched ALT ${toBase58(pubkey).slice(0, 8)}... (${count} addresses)`);
+            if (debugLogs) {
+                console.log(`[altGrpc] Fetched ALT ${toBase58(pubkey).slice(0, 8)}... (${count} addresses)`);
+            }
         },
     });
 

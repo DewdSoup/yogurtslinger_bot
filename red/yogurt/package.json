@@ -12,6 +12,7 @@
         "shadow:cross-venue": "tsx scripts/run-cross-venue-shadow.ts",
         "diagnose:shadow": "tsx scripts/diagnose-shadow-cross-venue.ts",
         "readiness:shadow": "tsx scripts/readiness-shadow-cross-venue.ts",
+        "prove:shadow-goal": "tsx scripts/prove-shadow-goal.ts",
         "prove:dlmm": "tsx scripts/prove-dlmm-l2.ts",
         "proof:topology": "tsx scripts/proof-topology-oracle.ts",
         "validate:topology": "tsx scripts/validate-topology-oracle-live.ts",
