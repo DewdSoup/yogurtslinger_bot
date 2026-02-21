@@ -16,7 +16,7 @@ import { createShredStreamConsumer } from '../src/ingest/shred.js';
 import { createPhase3Handler } from '../src/handler/phase3.js';
 import { createBackrunEngine, type StrategyMode } from '../src/execute/backrun.js';
 import { createJitoClient } from '../src/execute/submit.js';
-import { setMintProgramOverride } from '../src/execute/bundle.js';
+import { setMintProgramOverride, setPumpSwapGlobalConfig } from '../src/execute/bundle.js';
 import { createAltCache } from '../src/cache/alt.js';
 import { createAltGrpcFetcher } from '../src/pending/altGrpcFetcher.js';
 import { appendToHotlist } from '../src/pending/altFetcher.js';
@@ -541,6 +541,13 @@ async function main() {
     // Keep pair index live from gRPC account stream.
     grpcConsumer.onEvent(engine.handleCacheEvent);
 
+    // Sync PumpSwap GlobalConfig to bundle builder for PDA derivation.
+    const gcEntry = phase3.registry.globalConfig.get();
+    if (gcEntry) {
+        setPumpSwapGlobalConfig(gcEntry.config);
+        console.log(`[backrun] PumpSwap GlobalConfig synced (slot=${gcEntry.slot}, recipients=${gcEntry.config.protocolFeeRecipients.length})`);
+    }
+
     if (!DRY_RUN && rpcConn) {
         try {
             await refreshMintProgramOverrides();
@@ -549,6 +556,9 @@ async function main() {
         }
         const mintRefreshInterval = setInterval(() => {
             void refreshMintProgramOverrides().catch(() => {});
+            // Also re-sync GlobalConfig in case it updated
+            const gc = phase3.registry.globalConfig.get();
+            if (gc) setPumpSwapGlobalConfig(gc.config);
         }, 60_000);
         mintRefreshInterval.unref();
 

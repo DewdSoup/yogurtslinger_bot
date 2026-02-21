@@ -23,6 +23,7 @@ import type {
 } from '../types.js';
 import { VenueId, SwapDirection as Dir } from '../types.js';
 import type { BundleTransaction, BundleRequest } from './types.js';
+import type { PumpSwapGlobalConfig } from '../decode/programs/pumpswap.js';
 
 // ============================================================================
 // Constants
@@ -61,6 +62,12 @@ const RV4_SWAP_BASE_OUT_V2 = 17;
 const DLMM_SWAP_DISC = Buffer.from('f8c69e91e17587c8', 'hex');
 const WSOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 const MINT_PROGRAM_OVERRIDES = new Map<string, PublicKey>();
+let _cachedGlobalConfig: PumpSwapGlobalConfig | null = null;
+
+/** Set the PumpSwap GlobalConfig for PDA derivation in bundle building. */
+export function setPumpSwapGlobalConfig(config: PumpSwapGlobalConfig): void {
+    _cachedGlobalConfig = config;
+}
 
 // Well-known program IDs
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -178,13 +185,21 @@ function toPublicKey(bytes: Uint8Array | undefined, fallback: PublicKey): Public
     return new PublicKey(bytes);
 }
 
-function defaultTokenProgramForMint(mint: PublicKey): PublicKey {
+function defaultTokenProgramForMint(mint: PublicKey): PublicKey | null {
     const override = MINT_PROGRAM_OVERRIDES.get(mint.toBase58());
     if (override) return override;
     if (mint.equals(WSOL_MINT)) return TOKEN_PROGRAM;
-    // Pump.fun mints (suffix "pump") are Token-2022 mints in current flow.
-    if (mint.toBase58().endsWith('pump')) return TOKEN_2022_PROGRAM;
-    return TOKEN_PROGRAM;
+    // No heuristic — return null if not resolved via gRPC or RPC override.
+    return null;
+}
+
+/** Resolve token program or throw if unknown (caught by buildBundle). */
+function requireTokenProgram(mint: PublicKey): PublicKey {
+    const program = defaultTokenProgramForMint(mint);
+    if (!program) {
+        throw new Error(`mint_program_unknown:${mint.toBase58()}`);
+    }
+    return program;
 }
 
 function i64Le(index: number): Buffer {
@@ -215,8 +230,8 @@ function buildPumpSwapSwapIx(
     const quoteMint = new PublicKey(pool.quoteMint);
     const baseVault = new PublicKey(pool.baseVault);
     const quoteVault = new PublicKey(pool.quoteVault);
-    const baseTokenProgram = defaultTokenProgramForMint(baseMint);
-    const quoteTokenProgram = defaultTokenProgramForMint(quoteMint);
+    const baseTokenProgram = requireTokenProgram(baseMint);
+    const quoteTokenProgram = requireTokenProgram(quoteMint);
     const userBaseATA = deriveATA(payer, baseMint, baseTokenProgram);
     const userQuoteATA = deriveATA(payer, quoteMint, quoteTokenProgram);
 
@@ -247,7 +262,7 @@ function buildPumpSwapSwapIx(
         { pubkey: quoteVault, isSigner: false, isWritable: true },
     ];
 
-    // Prefer victim-observed trailing accounts to stay aligned with evolving PumpSwap IDL.
+    // Prefer victim-observed trailing accounts when available.
     if (params.pumpRemainingAccounts && params.pumpRemainingAccounts.length > 0) {
         for (const meta of params.pumpRemainingAccounts) {
             if (!meta?.pubkey || meta.pubkey.length !== 32) continue;
@@ -258,14 +273,34 @@ function buildPumpSwapSwapIx(
             });
         }
     } else {
-        // Backward-compatible fallback for legacy account layout.
+        // Derive remaining accounts from cached pool state + GlobalConfig.
+        if (!_cachedGlobalConfig || _cachedGlobalConfig.protocolFeeRecipients.length === 0) {
+            throw new Error('pumpswap_global_config_not_available');
+        }
+
+        // Use first non-zero protocol fee recipient
+        const feeRecipientBytes = _cachedGlobalConfig.protocolFeeRecipients[0]!;
+        const protocolFeeRecipient = new PublicKey(feeRecipientBytes);
+        const protocolFeeRecipientAta = deriveATA(protocolFeeRecipient, quoteMint, quoteTokenProgram);
+
+        // coinCreatorVaultAuthority = PDA(["creator_vault", pool.coinCreator], PumpSwap)
+        const [coinCreatorVaultAuthority] = PublicKey.findProgramAddressSync(
+            [Buffer.from('creator_vault'), Buffer.from(pool.coinCreator)],
+            PUMPSWAP_PROGRAM,
+        );
+        const coinCreatorVaultAta = deriveATA(coinCreatorVaultAuthority, quoteMint, quoteTokenProgram);
+
         keys.push(
-            { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
-            { pubkey: TOKEN_2022_PROGRAM, isSigner: false, isWritable: false },
-            { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },
-            { pubkey: ASSOC_TOKEN_PROGRAM, isSigner: false, isWritable: false },
-            { pubkey: getPumpEventAuthority(), isSigner: false, isWritable: false },
-            { pubkey: PUMPSWAP_PROGRAM, isSigner: false, isWritable: false },
+            { pubkey: protocolFeeRecipient, isSigner: false, isWritable: false },              // 9
+            { pubkey: protocolFeeRecipientAta, isSigner: false, isWritable: true },             // 10
+            { pubkey: baseTokenProgram, isSigner: false, isWritable: false },                   // 11
+            { pubkey: quoteTokenProgram, isSigner: false, isWritable: false },                  // 12
+            { pubkey: SYSTEM_PROGRAM, isSigner: false, isWritable: false },                     // 13
+            { pubkey: ASSOC_TOKEN_PROGRAM, isSigner: false, isWritable: false },                // 14
+            { pubkey: getPumpEventAuthority(), isSigner: false, isWritable: false },            // 15
+            { pubkey: PUMPSWAP_PROGRAM, isSigner: false, isWritable: false },                   // 16
+            { pubkey: coinCreatorVaultAta, isSigner: false, isWritable: true },                 // 17
+            { pubkey: coinCreatorVaultAuthority, isSigner: false, isWritable: false },          // 18
         );
     }
 
@@ -345,8 +380,8 @@ export function buildMeteoraDlmmSwapIx(
     const tokenYMint = new PublicKey(pool.tokenYMint);
     const reserveX = new PublicKey(pool.vaultX);
     const reserveY = new PublicKey(pool.vaultY);
-    const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, defaultTokenProgramForMint(tokenXMint));
-    const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, defaultTokenProgramForMint(tokenYMint));
+    const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, requireTokenProgram(tokenXMint));
+    const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, requireTokenProgram(tokenYMint));
 
     const userTokenX = deriveATA(payer, tokenXMint, tokenXProgram);
     const userTokenY = deriveATA(payer, tokenYMint, tokenYProgram);
@@ -420,8 +455,8 @@ function collectUserAtaSpecs(params: SwapParams): UserAtaSpec[] {
         const pool = params.pool as MeteoraDlmmPool;
         const tokenXMint = new PublicKey(pool.tokenXMint);
         const tokenYMint = new PublicKey(pool.tokenYMint);
-        const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, defaultTokenProgramForMint(tokenXMint));
-        const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, defaultTokenProgramForMint(tokenYMint));
+        const tokenXProgram = toPublicKey(params.dlmm?.tokenXProgram, requireTokenProgram(tokenXMint));
+        const tokenYProgram = toPublicKey(params.dlmm?.tokenYProgram, requireTokenProgram(tokenYMint));
         return [
             { mint: tokenXMint, tokenProgram: tokenXProgram },
             { mint: tokenYMint, tokenProgram: tokenYProgram },
@@ -432,10 +467,10 @@ function collectUserAtaSpecs(params: SwapParams): UserAtaSpec[] {
     const baseMint = new PublicKey(pool.baseMint);
     const quoteMint = new PublicKey(pool.quoteMint);
     const baseTokenProgram = params.pool.venue === VenueId.PumpSwap
-        ? defaultTokenProgramForMint(baseMint)
+        ? requireTokenProgram(baseMint)
         : TOKEN_PROGRAM;
     const quoteTokenProgram = params.pool.venue === VenueId.PumpSwap
-        ? defaultTokenProgramForMint(quoteMint)
+        ? requireTokenProgram(quoteMint)
         : TOKEN_PROGRAM;
     return [
         { mint: baseMint, tokenProgram: baseTokenProgram },

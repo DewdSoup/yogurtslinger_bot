@@ -197,7 +197,7 @@ interface ShadowRecord {
     submitOk?: boolean;
     submitError?: string;
     submitLatencyMs?: number;
-    submitMode?: 'primary_with_victim' | 'fallback_without_victim' | 'retry_fresh_blockhash';
+    submitMode?: string;
 }
 
 interface ShadowLedger {
@@ -1259,119 +1259,101 @@ export function createBackrunEngine(config: BackrunConfig) {
                 }
             }
 
-            const primary = await config.jitoClient.submitWithRetry(submitBundle);
-            appendShadowRecord(shadowLedger, {
-                event: 'submit_result',
-                ts: nowIso(),
-                slot: update.slot,
-                signatureHex: toHex(update.signature),
-                strategy: strategyMode,
-                runMode,
-                pairKey: counterpart.pairKey,
-                counterpartPool: bestPoolHex,
-                route: best!.venueRoute,
-                candidateInputLamports: best!.inputLamports.toString(),
-                bestNetLamports: best!.netLamports.toString(),
-                bestGrossLamports: best!.grossLamports.toString(),
-                netToInputBps: netToInputBps.toString(),
-                tipLamports: config.tipLamports.toString(),
-                gasCostLamports: gasCostLamports.toString(),
-                haircutLamports: best!.haircutLamports.toString(),
-                swap1MinOutLamports: swap1MinOut.toString(),
-                swap2MinOutLamports: swap2MinOut.toString(),
-                submitOk: primary.submitted,
-                bundleId: primary.bundleId,
-                submitError: primary.error,
-                submitLatencyMs: primary.latencyMs,
-                submitMode: includeVictimTx ? 'primary_with_victim' : 'fallback_without_victim',
-            });
+            // Submit primary and standalone bundles concurrently when victim TX is included.
+            // This eliminates the 30-90ms wasted on the sequential "already processed" → fallback path.
+            const standaloneBundle = includeVictimTx ? buildFallbackBundleWithoutVictim(submitBundle) : null;
 
-            let finalResult = primary;
-            if (!finalResult.submitted && isExpiredBlockhashSubmissionError(finalResult.error)) {
-                await config.refreshRecentBlockhash?.(true);
-                const rebuilt = buildBundle(
-                    swap1Params,
-                    swap2Params,
-                    config.payerKeypair,
-                    bundleConfig,
-                    config.getRecentBlockhash(),
-                    victimTxBytes,
+            const submissions: Array<Promise<{ result: import('../types.js').BundleResult; mode: string }>> = [];
+            submissions.push(
+                config.jitoClient.submitWithRetry(submitBundle).then(r => ({
+                    result: r,
+                    mode: includeVictimTx ? 'primary_with_victim' : 'standalone',
+                })),
+            );
+            if (standaloneBundle) {
+                submissions.push(
+                    config.jitoClient.submitWithRetry(standaloneBundle).then(r => ({
+                        result: r,
+                        mode: 'parallel_standalone',
+                    })),
                 );
-                if (rebuilt.success && rebuilt.bundle) {
-                    const retried = await config.jitoClient.submitWithRetry(rebuilt.bundle);
-                    appendShadowRecord(shadowLedger, {
-                        event: 'submit_result',
-                        ts: nowIso(),
-                        slot: update.slot,
-                        signatureHex: toHex(update.signature),
-                        strategy: strategyMode,
-                        runMode,
-                        pairKey: counterpart.pairKey,
-                        counterpartPool: bestPoolHex,
-                        route: best!.venueRoute,
-                        candidateInputLamports: best!.inputLamports.toString(),
-                        bestNetLamports: best!.netLamports.toString(),
-                        bestGrossLamports: best!.grossLamports.toString(),
-                        netToInputBps: netToInputBps.toString(),
-                        tipLamports: config.tipLamports.toString(),
-                        gasCostLamports: gasCostLamports.toString(),
-                        haircutLamports: best!.haircutLamports.toString(),
-                        swap1MinOutLamports: swap1MinOut.toString(),
-                        swap2MinOutLamports: swap2MinOut.toString(),
-                        submitOk: retried.submitted,
-                        bundleId: retried.bundleId,
-                        submitError: retried.error,
-                        submitLatencyMs: retried.latencyMs,
-                        submitMode: 'retry_fresh_blockhash',
-                    });
-                    finalResult = retried;
-                    bumpReason(
-                        stats.skipReasons,
-                        retried.submitted ? 'submit_retry_fresh_blockhash_success' : 'submit_retry_fresh_blockhash_failed',
-                    );
-                } else {
-                    bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+            }
+
+            const settled = await Promise.allSettled(submissions);
+
+            // Pick the best result: prefer submitted over not-submitted
+            let finalResult: import('../types.js').BundleResult | null = null;
+            let finalMode = 'unknown';
+            for (const s of settled) {
+                if (s.status !== 'fulfilled') continue;
+                const { result, mode } = s.value;
+                appendShadowRecord(shadowLedger, {
+                    event: 'submit_result',
+                    ts: nowIso(),
+                    slot: update.slot,
+                    signatureHex: toHex(update.signature),
+                    strategy: strategyMode,
+                    runMode,
+                    pairKey: counterpart.pairKey,
+                    counterpartPool: bestPoolHex,
+                    route: best!.venueRoute,
+                    candidateInputLamports: best!.inputLamports.toString(),
+                    bestNetLamports: best!.netLamports.toString(),
+                    bestGrossLamports: best!.grossLamports.toString(),
+                    netToInputBps: netToInputBps.toString(),
+                    tipLamports: config.tipLamports.toString(),
+                    gasCostLamports: gasCostLamports.toString(),
+                    haircutLamports: best!.haircutLamports.toString(),
+                    swap1MinOutLamports: swap1MinOut.toString(),
+                    swap2MinOutLamports: swap2MinOut.toString(),
+                    submitOk: result.submitted,
+                    bundleId: result.bundleId,
+                    submitError: result.error,
+                    submitLatencyMs: result.latencyMs,
+                    submitMode: mode,
+                });
+                if (result.submitted && (!finalResult || !finalResult.submitted)) {
+                    finalResult = result;
+                    finalMode = mode;
+                } else if (!finalResult) {
+                    finalResult = result;
+                    finalMode = mode;
                 }
             }
-            if (includeVictimTx && !primary.submitted && isAlreadyProcessedSubmissionError(primary.error)) {
-                const fallbackBundle = buildFallbackBundleWithoutVictim(builtBundle);
-                if (fallbackBundle) {
-                    bumpReason(stats.skipReasons, 'submit_victim_already_processed');
-                    const fallback = await config.jitoClient.submitWithRetry(fallbackBundle);
-                    appendShadowRecord(shadowLedger, {
-                        event: 'submit_result',
-                        ts: nowIso(),
-                        slot: update.slot,
-                        signatureHex: toHex(update.signature),
-                        strategy: strategyMode,
-                        runMode,
-                        pairKey: counterpart.pairKey,
-                        counterpartPool: bestPoolHex,
-                        route: best!.venueRoute,
-                        candidateInputLamports: best!.inputLamports.toString(),
-                        bestNetLamports: best!.netLamports.toString(),
-                        bestGrossLamports: best!.grossLamports.toString(),
-                        netToInputBps: netToInputBps.toString(),
-                        tipLamports: config.tipLamports.toString(),
-                        gasCostLamports: gasCostLamports.toString(),
-                        haircutLamports: best!.haircutLamports.toString(),
-                        swap1MinOutLamports: swap1MinOut.toString(),
-                        swap2MinOutLamports: swap2MinOut.toString(),
-                        submitOk: fallback.submitted,
-                        bundleId: fallback.bundleId,
-                        submitError: fallback.error,
-                        submitLatencyMs: fallback.latencyMs,
-                        submitMode: 'fallback_without_victim',
-                    });
-                    finalResult = fallback;
-                    bumpReason(stats.skipReasons, fallback.submitted ? 'submit_fallback_success' : 'submit_fallback_failed');
-                }
+
+            if (standaloneBundle) {
+                bumpReason(stats.skipReasons, finalMode === 'primary_with_victim' ? 'submit_primary_won' : 'submit_standalone_won');
             }
 
             maybeWriteShadowSummary();
-            if (!finalResult.submitted) {
+            if (!finalResult || !finalResult.submitted) {
+                // Try expired blockhash retry as last resort
+                if (finalResult && isExpiredBlockhashSubmissionError(finalResult.error)) {
+                    await config.refreshRecentBlockhash?.(true);
+                    const rebuilt = buildBundle(
+                        swap1Params,
+                        swap2Params,
+                        config.payerKeypair,
+                        bundleConfig,
+                        config.getRecentBlockhash(),
+                    );
+                    if (rebuilt.success && rebuilt.bundle) {
+                        const retried = await config.jitoClient.submitWithRetry(rebuilt.bundle);
+                        finalResult = retried;
+                        finalMode = 'retry_fresh_blockhash';
+                        bumpReason(
+                            stats.skipReasons,
+                            retried.submitted ? 'submit_retry_fresh_blockhash_success' : 'submit_retry_fresh_blockhash_failed',
+                        );
+                    } else {
+                        bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                    }
+                }
+            }
+
+            if (!finalResult || !finalResult.submitted) {
                 bumpReason(stats.skipReasons, 'submit_failed');
-                const classified = classifySubmitError(finalResult.error);
+                const classified = classifySubmitError(finalResult?.error);
                 if (classified) {
                     bumpReason(stats.skipReasons, classified);
                 }
@@ -1610,41 +1592,72 @@ export function createBackrunEngine(config: BackrunConfig) {
                 }
             }
 
-            const primary = await config.jitoClient.submitWithRetry(submitBundle);
-            let finalResult = primary;
-            if (!finalResult.submitted && isExpiredBlockhashSubmissionError(finalResult.error)) {
-                await config.refreshRecentBlockhash?.(true);
-                const rebuilt = buildBundle(
-                    swap1Params,
-                    swap2Params,
-                    config.payerKeypair,
-                    bundleConfig,
-                    config.getRecentBlockhash(),
-                    victimTxBytes,
+            // Submit primary and standalone bundles concurrently (same pattern as cross-venue path).
+            const standaloneBundle = includeVictimTx ? buildFallbackBundleWithoutVictim(submitBundle) : null;
+
+            const submissions: Array<Promise<{ result: import('../types.js').BundleResult; mode: string }>> = [];
+            submissions.push(
+                config.jitoClient.submitWithRetry(submitBundle).then(r => ({
+                    result: r,
+                    mode: includeVictimTx ? 'primary_with_victim' : 'standalone',
+                })),
+            );
+            if (standaloneBundle) {
+                submissions.push(
+                    config.jitoClient.submitWithRetry(standaloneBundle).then(r => ({
+                        result: r,
+                        mode: 'parallel_standalone',
+                    })),
                 );
-                if (rebuilt.success && rebuilt.bundle) {
-                    const retried = await config.jitoClient.submitWithRetry(rebuilt.bundle);
-                    finalResult = retried;
-                    bumpReason(
-                        stats.skipReasons,
-                        retried.submitted ? 'submit_retry_fresh_blockhash_success' : 'submit_retry_fresh_blockhash_failed',
+            }
+
+            const settled = await Promise.allSettled(submissions);
+
+            let finalResult: import('../types.js').BundleResult | null = null;
+            let finalMode = 'unknown';
+            for (const s of settled) {
+                if (s.status !== 'fulfilled') continue;
+                const { result, mode } = s.value;
+                if (result.submitted && (!finalResult || !finalResult.submitted)) {
+                    finalResult = result;
+                    finalMode = mode;
+                } else if (!finalResult) {
+                    finalResult = result;
+                    finalMode = mode;
+                }
+            }
+
+            if (standaloneBundle) {
+                bumpReason(stats.skipReasons, finalMode === 'primary_with_victim' ? 'submit_primary_won' : 'submit_standalone_won');
+            }
+
+            if (!finalResult || !finalResult.submitted) {
+                if (finalResult && isExpiredBlockhashSubmissionError(finalResult.error)) {
+                    await config.refreshRecentBlockhash?.(true);
+                    const rebuilt = buildBundle(
+                        swap1Params,
+                        swap2Params,
+                        config.payerKeypair,
+                        bundleConfig,
+                        config.getRecentBlockhash(),
                     );
-                } else {
-                    bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                    if (rebuilt.success && rebuilt.bundle) {
+                        const retried = await config.jitoClient.submitWithRetry(rebuilt.bundle);
+                        finalResult = retried;
+                        finalMode = 'retry_fresh_blockhash';
+                        bumpReason(
+                            stats.skipReasons,
+                            retried.submitted ? 'submit_retry_fresh_blockhash_success' : 'submit_retry_fresh_blockhash_failed',
+                        );
+                    } else {
+                        bumpReason(stats.skipReasons, 'submit_retry_build_failed');
+                    }
                 }
             }
-            if (!primary.submitted && isAlreadyProcessedSubmissionError(primary.error)) {
-                const fallbackBundle = buildFallbackBundleWithoutVictim(builtBundle);
-                if (fallbackBundle) {
-                    bumpReason(stats.skipReasons, 'submit_victim_already_processed');
-                    const fallback = await config.jitoClient.submitWithRetry(fallbackBundle);
-                    finalResult = fallback;
-                    bumpReason(stats.skipReasons, fallback.submitted ? 'submit_fallback_success' : 'submit_fallback_failed');
-                }
-            }
-            if (!finalResult.submitted) {
+
+            if (!finalResult || !finalResult.submitted) {
                 bumpReason(stats.skipReasons, 'submit_failed');
-                const classified = classifySubmitError(finalResult.error);
+                const classified = classifySubmitError(finalResult?.error);
                 if (classified) {
                     bumpReason(stats.skipReasons, classified);
                 }

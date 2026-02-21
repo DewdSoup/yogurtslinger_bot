@@ -105,6 +105,7 @@ export interface PumpSwapPool {
     quoteVault: Uint8Array;
     lpMint: Uint8Array;
     lpSupply: bigint;
+    coinCreator: Uint8Array;
     // Note: reserves come from vault token accounts, not pool state
     // Fees come from GlobalConfig, not pool state
     // Runtime-injected fields (from vault balances and config)

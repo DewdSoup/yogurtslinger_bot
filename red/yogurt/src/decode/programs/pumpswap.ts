@@ -118,6 +118,7 @@ export function decodePumpSwapPool(
         baseVault: needsSwap ? rawQuoteVault : rawBaseVault,
         quoteVault: needsSwap ? rawBaseVault : rawQuoteVault,
         lpSupply: view.getBigUint64(203, true),
+        coinCreator: data.slice(11, 43),
     };
 }
 
@@ -325,6 +326,7 @@ export interface PumpSwapGlobalConfig {
     lpFeeBps: bigint;
     protocolFeeBps: bigint;
     coinCreatorFeeBps: bigint;
+    protocolFeeRecipients: Uint8Array[];
 }
 
 /**
@@ -368,6 +370,7 @@ export function getDefaultPumpSwapFees(): PumpSwapGlobalConfig {
         lpFeeBps: 20n,
         protocolFeeBps: 5n,
         coinCreatorFeeBps: 0n,
+        protocolFeeRecipients: [],
     };
 }
 
@@ -394,7 +397,14 @@ export function decodePumpSwapGlobalConfig(data: Uint8Array): PumpSwapGlobalConf
 
         // Validate: fees should be reasonable (0-1000 bps = 0-10%)
         if (lpFeeBps <= 1000n && protocolFeeBps <= 1000n && coinCreatorFeeBps <= 1000n) {
-            return { lpFeeBps, protocolFeeBps, coinCreatorFeeBps };
+            // Extract protocolFeeRecipients (8 pubkeys at offset 64..320)
+            const recipients: Uint8Array[] = [];
+            if (data.length >= 320) {
+                for (let i = 0; i < 8; i++) {
+                    recipients.push(data.slice(64 + i * 32, 64 + (i + 1) * 32));
+                }
+            }
+            return { lpFeeBps, protocolFeeBps, coinCreatorFeeBps, protocolFeeRecipients: recipients };
         }
 
         // If fees look wrong, fall through to default

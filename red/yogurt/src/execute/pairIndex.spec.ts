@@ -35,6 +35,7 @@ test('PairIndex tracks PumpSwap<->DLMM counterparts on WSOL pairs', () => {
         quoteVault: ZERO32,
         lpMint: ZERO32,
         lpSupply: 0n,
+        coinCreator: ZERO32,
     };
 
     const dlmmPool: MeteoraDlmmPool = {
@@ -78,6 +79,7 @@ test('PairIndex ignores non-WSOL pairs', () => {
         quoteVault: ZERO32,
         lpMint: ZERO32,
         lpSupply: 0n,
+        coinCreator: ZERO32,
     };
 
     idx.upsertPool(psPool.pool, psPool, 10);

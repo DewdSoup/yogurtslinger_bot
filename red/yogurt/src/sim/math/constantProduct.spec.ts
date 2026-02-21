@@ -27,6 +27,7 @@ function makePumpSwapPool(overrides: Partial<PumpSwapPoolReady> = {}): PumpSwapP
         quoteVault: ZERO32,
         lpMint: ZERO32,
         lpSupply: 0n,
+        coinCreator: ZERO32,
         baseReserve: 1_000_000n,
         quoteReserve: 2_000_000n,
         lpFeeBps: 20n,

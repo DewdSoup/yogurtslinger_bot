@@ -26,6 +26,7 @@ import { commitAccountUpdate, type CacheRegistry } from '../cache/commit.js';
 import { createLifecycleRegistry, PoolLifecycleState } from '../cache/lifecycle.js';
 import { decodeAccount, isTargetProgram } from '../decode/account.js';
 import { decodeTokenAccountAmount } from '../decode/vault.js';
+import { setMintProgramOverride } from '../execute/bundle.js';
 import { isTickArray, decodeTickArray } from '../decode/programs/tickArray.js';
 import { isBinArray, decodeBinArray } from '../decode/programs/binArray.js';
 import { decodePumpSwapGlobalConfig, PUMPSWAP_GLOBAL_CONFIG_PUBKEY } from '../decode/programs/pumpswap.js';
@@ -702,6 +703,13 @@ export function createPhase3Handler(config: Phase3HandlerConfig): Phase3Handler 
         if (trackedVaults.has(pubkeyHex)) {
             const amount = decodeTokenAccountAmount(update.data);
             if (amount !== null) {
+                // Register mint → token program mapping from gRPC owner field.
+                // The account owner (update.owner) is the token program (SPL Token or Token-2022).
+                // The mint is at bytes [0..32] of the token account data.
+                if (update.data.length >= 32) {
+                    setMintProgramOverride(update.data.slice(0, 32), update.owner);
+                }
+
                 // Use canonical commit function
                 const result = commitAccountUpdate(registry, {
                     type: 'vault',
