@@ -1,41 +1,46 @@
 {
-  "lastUpdated": "2026-01-27",
-  "updatedBy": "Cache Validation Session",
-  "sessionSummary": "CPMM Layer 1 PROVEN: PumpSwap and RaydiumV4. Cache VALIDATED, Math VALIDATED. Ready for Layer 3.",
+  "lastUpdated": "2026-02-21",
+  "updatedBy": "Execution Debug Session",
+  "sessionSummary": "Layer 1 PROVEN: PumpSwap, RaydiumV4, MeteoraDlmm. Layer 3 exists for cross_venue_ps_dlmm but has execution correctness blockers preventing live profit.",
 
-  "activeLayer": 2,
-  "activeLayerName": "Proving Tools",
+  "activeLayer": 3,
+  "activeLayerName": "Execution Pipeline",
 
   "layerStatus": {
     "layer1_localCacheState": {
-      "status": "PROVEN_CPMM",
+      "status": "PROVEN_CPMM_DLMM",
       "subComponents": {
         "dataPipeline": {
           "description": "gRPC -> Pool Decoders -> Caches",
-          "status": "VALIDATED_CPMM",
+          "status": "VALIDATED_CPMM_DLMM",
           "pumpswap": "VALIDATED",
           "raydiumV4": "VALIDATED",
           "raydiumClmm": "NOT_TESTED",
-          "meteoraDlmm": "NOT_TESTED",
+          "meteoraDlmm": "VALIDATED",
           "notes": "gRPC delivers 100% accurate state at slot boundaries. See docs/validation/LOCAL_CACHE_VALIDATION.md"
         },
         "mathEngines": {
           "description": "Pool State -> Math Functions -> Swap Output",
-          "status": "CPMM_PROVEN",
-          "provenVenues": ["PumpSwap", "RaydiumV4"],
-          "unprovenVenues": ["RaydiumClmm", "MeteoraDlmm"],
-          "notes": "CPMM math proven for PumpSwap (95.98%/100%) and RaydiumV4 (98.26%/100%)."
+          "status": "CPMM_DLMM_PROVEN",
+          "provenVenues": ["PumpSwap", "RaydiumV4", "MeteoraDlmm"],
+          "unprovenVenues": ["RaydiumClmm"],
+          "notes": "CPMM proven for PumpSwap (95.98%/100%) and RaydiumV4 (98.26%/100%). DLMM proven: 99.89% pass @ 100bps (911/911 sim success, p50=0bps, p95=1bps)."
         }
       },
       "blockers": []
     },
     "layer2_provingTools": {
       "status": "working",
-      "notes": "prove-infrastructure.ts supports all venues via --venue flag"
+      "notes": "prove-infrastructure.ts supports all venues. prove-dlmm-l2.ts validated DLMM math."
     },
     "layer3_executionPipeline": {
-      "status": "not_started",
-      "blockers": ["Complete venue validation first"]
+      "status": "in_progress",
+      "notes": "cross_venue_ps_dlmm strategy implemented. Pipeline functional end-to-end (detect → evaluate → build → submit). Zero landed bundles due to execution correctness blockers.",
+      "blockers": [
+        "P0: Token program mismatch in bundle construction (Anchor errors 0xbbf/0xbc0)",
+        "P1: Victim TX always already processed (latency — make standalone arb primary path)",
+        "P2: Stale state in fallback path (re-evaluate route at submission time)"
+      ]
     },
     "layer4_predictionLayer": {
       "status": "not_started",
@@ -43,8 +48,8 @@
     }
   },
 
-  "currentVenue": "RaydiumV4",
-  "previousVenue": "PumpSwap",
+  "currentVenue": "MeteoraDlmm",
+  "previousVenue": "RaydiumV4",
 
   "venueStatus": {
     "pumpswap": {
@@ -77,66 +82,110 @@
     "raydiumClmm": {
       "status": "not_started",
       "mathType": "CLMM (concentrated liquidity)",
-      "evidenceCount": 1570,
+      "evidenceCount": 2564,
       "notes": "Different math - tick-based concentrated liquidity",
       "expectedEffort": "HIGH - different math engine"
     },
     "meteoraDlmm": {
-      "status": "not_started",
+      "status": "PROVEN",
+      "validationReport": "data/evidence/prove-dlmm-l2-5da88941-b7c6-48f8-b8fd-0c24cde17884.json",
+      "layer3Ready": true,
       "mathType": "DLMM (dynamic liquidity)",
-      "evidenceCount": 208,
-      "notes": "Different math - bin-based dynamic liquidity",
-      "expectedEffort": "HIGH - different math engine"
+      "metrics": {
+        "singleSwap": { "passRate": "99.89%", "evaluated": 911, "simSuccessRate": "100%" },
+        "errorDistribution": { "p50Bps": 0, "p95Bps": 1, "maxBps": 105 }
+      },
+      "knownIssues": [
+        "Single outlier at 105bps due to stale state (pool lag p95=260 slots), not math error",
+        "28 swaps skipped due to no prior pool state in evidence DB (coverage, not correctness)"
+      ]
     }
   },
 
   "nextActions": [
     {
       "priority": "P0",
-      "action": "Begin Layer 3 development for CPMM venues",
-      "details": "PumpSwap and RaydiumV4 are proven. Build execution pipeline."
+      "action": "Fix token program resolution in bundle construction",
+      "details": "Anchor errors 0xbbf (AccountOwnedByWrongProgram) and 0xbc0 (InvalidProgramId) reject all bundles. defaultTokenProgramForMint() uses unreliable string heuristic. Must eagerly resolve mint→program at pool activation and guard bundle builder against unresolved mints."
     },
     {
       "priority": "P1",
-      "action": "Validate RaydiumClmm",
-      "details": "Different math - concentrated liquidity with ticks",
-      "effort": "HIGH"
+      "action": "Make standalone arb the primary submission path",
+      "details": "All 8 primary submissions with victim TX failed (already processed). Victim inclusion should be opportunistic, not required. Standalone cross-venue arb should be primary."
     },
     {
       "priority": "P2",
-      "action": "Validate MeteoraDlmm",
-      "details": "Different math - dynamic liquidity with bins",
+      "action": "Re-evaluate route freshness at submission time",
+      "details": "Fallback path uses stale evaluation state. Should re-check cache state freshness before submitting."
+    },
+    {
+      "priority": "P3",
+      "action": "Validate RaydiumClmm",
+      "details": "Different math - concentrated liquidity with ticks. 2564 evidence swaps available.",
       "effort": "HIGH"
     }
   ],
 
+  "executionDiagnostics": {
+    "latestRun": "data/live/run-1771630893426-877635",
+    "runMetrics": {
+      "shredTxsReceived": 780967,
+      "swapsDetected": 32441,
+      "candidateEvaluations": 1577,
+      "routeEvaluations": 2949,
+      "opportunitiesFound": 9,
+      "bundlesBuilt": 8,
+      "bundlesSubmitted": 8,
+      "predictedProfitLamports": 27410806,
+      "accepted": 0,
+      "rejected": 8,
+      "landed": 0,
+      "walletNetLamports": 0
+    },
+    "rejectionPattern": {
+      "primaryWithVictim": "All 8 failed: 'bundle contains an already processed transaction'",
+      "fallbackWithoutVictim": "All 8 submitted but rejected: simulationFailure at Instruction 4",
+      "errorCodes": {
+        "0xbbf": "Anchor 3007: AccountOwnedByWrongProgram (6 bundles)",
+        "0xbc0": "Anchor 3008: InvalidProgramId (2 bundles)"
+      },
+      "rootCause": "defaultTokenProgramForMint() in bundle.ts uses string suffix heuristic that returns wrong token program for mints"
+    }
+  },
+
   "handoffInstructions": {
     "forNextAgent": [
       "1. Read MENTAL_MAP.md and LAYERS.md first",
-      "2. PumpSwap and RaydiumV4 are PROVEN - Layer 3 ready",
-      "3. Next: Build Layer 3 execution pipeline OR validate CLMM/DLMM",
-      "4. See docs/validation/ for validation reports"
+      "2. PumpSwap, RaydiumV4, MeteoraDlmm are PROVEN — Layer 3 active",
+      "3. Layer 3 exists but has execution correctness blockers (see nextActions P0-P2)",
+      "4. P0 blocker: token program mismatch in bundle.ts:defaultTokenProgramForMint()",
+      "5. See live_execution_status.md for full pipeline description and diagnostic guide"
     ],
     "keyFiles": {
+      "bundleBuilder": "src/execute/bundle.ts",
+      "backrunEngine": "src/execute/backrun.ts",
+      "runScript": "scripts/run-backrun.ts",
+      "submitClient": "src/execute/submit.ts",
+      "dlmmMath": "src/sim/math/dlmm.ts",
       "provingScript": "scripts/prove-infrastructure.ts",
-      "mathEngine": "src/sim/math/constantProduct.ts",
-      "raydiumDecoder": "src/decode/programs/raydiumV4.ts",
+      "dlmmProving": "scripts/prove-dlmm-l2.ts",
       "evidenceDb": "data/evidence/capture.db"
     },
     "commonIssues": [
+      "Token program resolution: defaultTokenProgramForMint() uses endsWith('pump') heuristic — BROKEN",
+      "Victim TX latency: always already processed on residential internet",
       "Fee structure may differ per venue - check GlobalConfig/AmmConfig",
-      "Direction parsing is unreliable - use vault deltas instead",
-      "Multi-swap: use k-invariant check, not per-leg validation"
+      "Direction parsing is unreliable - use vault deltas instead"
     ]
   },
 
   "evidence": {
     "database": "data/evidence/capture.db",
     "captureStats": {
-      "pumpswap": 84225,
-      "raydiumV4": 5782,
-      "raydiumClmm": 1570,
-      "meteoraDlmm": 208
+      "pumpswap": 143360,
+      "raydiumV4": 510,
+      "raydiumClmm": 2564,
+      "meteoraDlmm": 939
     }
   },
 
@@ -151,6 +200,11 @@
       "feeModel": "inputFee",
       "feeBps": 25,
       "mathType": "CPMM",
+      "status": "PROVEN"
+    },
+    "meteoraDlmm": {
+      "feeModel": "dynamicFee",
+      "mathType": "DLMM",
       "status": "PROVEN"
     }
   }

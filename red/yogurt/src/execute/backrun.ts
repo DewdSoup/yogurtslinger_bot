@@ -112,6 +112,9 @@ export interface BackrunConfig {
     maxAbsoluteNetLamports?: bigint;
     canaryMaxInputLamports?: bigint;
     canaryMaxSubmissionsPerHour?: number;
+    maxSubmissionsPerSecond?: number;
+    duplicateOpportunityTtlMs?: number;
+    maxOpportunityAgeMs?: number;
     strictSlotConsistency?: boolean;
     includeVictimTx?: boolean;
     strategyMode?: StrategyMode;
@@ -494,6 +497,7 @@ function writeLatestShadowSummary(stats: BackrunStats, ledger: ShadowLedger): vo
         strategyMode: stats.strategyMode,
         counters: {
             shredTxsReceived: stats.shredTxsReceived.toString(),
+            pendingAltMisses: stats.pendingAltMisses.toString(),
             swapsDetected: stats.swapsDetected.toString(),
             candidateEvaluations: stats.candidateEvaluations.toString(),
             routeEvaluations: stats.routeEvaluations.toString(),
@@ -581,8 +585,48 @@ export function createBackrunEngine(config: BackrunConfig) {
     const maxAbsoluteNetLamports = config.maxAbsoluteNetLamports ?? 5_000_000_000n;
     const canaryMaxInputLamports = config.canaryMaxInputLamports ?? 0n;
     const canaryMaxSubmissionsPerHour = Math.max(0, config.canaryMaxSubmissionsPerHour ?? 0);
+    const maxSubmissionsPerSecond = Math.max(0, config.maxSubmissionsPerSecond ?? 4);
+    const duplicateOpportunityTtlMs = Math.max(0, config.duplicateOpportunityTtlMs ?? 2500);
+    const maxOpportunityAgeMs = Math.max(0, config.maxOpportunityAgeMs ?? 1500);
     let canaryWindowStartMs = Date.now();
     let canarySubmissionsInWindow = 0;
+    const recentSubmissionReservesMs: number[] = [];
+    const recentOpportunityKeys = new Map<string, number>();
+    const countedSubmittedBundleIds = new Set<string>();
+
+    function reserveSubmissionSlot(): string | null {
+        if (config.dryRun || maxSubmissionsPerSecond <= 0) return null;
+        const nowMs = Date.now();
+        while (recentSubmissionReservesMs.length > 0 && nowMs - recentSubmissionReservesMs[0]! >= 1_000) {
+            recentSubmissionReservesMs.shift();
+        }
+        if (recentSubmissionReservesMs.length >= maxSubmissionsPerSecond) {
+            return 'submit_rate_governor';
+        }
+        recentSubmissionReservesMs.push(nowMs);
+        return null;
+    }
+
+    function reserveOpportunityKey(key: string): string | null {
+        if (duplicateOpportunityTtlMs <= 0) return null;
+        const nowMs = Date.now();
+        for (const [k, ts] of recentOpportunityKeys) {
+            if (nowMs - ts > duplicateOpportunityTtlMs) recentOpportunityKeys.delete(k);
+        }
+        const prev = recentOpportunityKeys.get(key);
+        if (prev !== undefined && nowMs - prev <= duplicateOpportunityTtlMs) {
+            return 'duplicate_opportunity_suppressed';
+        }
+        recentOpportunityKeys.set(key, nowMs);
+        return null;
+    }
+
+    function reserveSubmittedBundleId(bundleId: string | undefined): boolean {
+        if (!bundleId) return true;
+        if (countedSubmittedBundleIds.has(bundleId)) return false;
+        countedSubmittedBundleIds.add(bundleId);
+        return true;
+    }
 
     function reserveCanarySubmission(inputLamports: bigint): string | null {
         if (config.dryRun) return null;
@@ -697,6 +741,7 @@ export function createBackrunEngine(config: BackrunConfig) {
 
         stats.shredTxsReceived++;
         const update: TxUpdate = event.update;
+        const receivedAtMs = event.ingestTimestampMs ?? Date.now();
 
         const decodeStart = process.hrtime.bigint();
         const decoded = decodeTx(update, config.altCache);
@@ -706,6 +751,9 @@ export function createBackrunEngine(config: BackrunConfig) {
             stats.pendingDecodeFailures++;
             if (decoded.altMisses) {
                 stats.pendingAltMisses += BigInt(decoded.altMisses.length);
+                bumpReason(stats.skipReasons, 'decode_alt_miss');
+            } else {
+                bumpReason(stats.skipReasons, 'decode_parse_failed');
             }
             recordSkip('decode_failed', update);
             return;
@@ -728,9 +776,9 @@ export function createBackrunEngine(config: BackrunConfig) {
         for (const leg of swapLegs.legs) {
             stats.swapsDetected++;
             if (strategyMode === 'legacy_cpmm_same_pool') {
-                processLegacyCpmmSamePool(leg, update, decoded.tx as any);
+                processLegacyCpmmSamePool(leg, update, decoded.tx as any, receivedAtMs);
             } else {
-                processCrossVenuePsDlmm(leg, update, decoded.tx as any);
+                processCrossVenuePsDlmm(leg, update, decoded.tx as any, receivedAtMs);
             }
         }
     }
@@ -739,6 +787,7 @@ export function createBackrunEngine(config: BackrunConfig) {
         leg: SwapLeg,
         update: TxUpdate,
         decodedTx?: { accountKeys: Uint8Array[]; instructions?: import('../types.js').CompiledInstruction[] },
+        receivedAtMs?: number,
     ): void {
         const victimEntry = config.poolCache.get(leg.pool);
         if (!victimEntry || victimEntry.state.venue !== VenueId.PumpSwap) {
@@ -790,17 +839,21 @@ export function createBackrunEngine(config: BackrunConfig) {
             }
         }
 
-        const victimResult = simulateConstantProduct({
-            pool: leg.pool,
-            venue: VenueId.PumpSwap,
-            direction: leg.direction,
-            inputAmount: victimInput,
-            poolState: victimPool,
-        });
+        let poolAStateBase = victimPool;
+        if (includeVictimTx) {
+            const victimResult = simulateConstantProduct({
+                pool: leg.pool,
+                venue: VenueId.PumpSwap,
+                direction: leg.direction,
+                inputAmount: victimInput,
+                poolState: victimPool,
+            });
 
-        if (!victimResult.success) {
-            recordSkip('victim_sim_failed', update, counterpart.pairKey);
-            return;
+            if (!victimResult.success) {
+                recordSkip('victim_sim_failed', update, counterpart.pairKey);
+                return;
+            }
+            poolAStateBase = victimResult.newPoolState as typeof victimPool;
         }
 
         const adaptiveSizes = [...SIZE_CANDIDATES];
@@ -841,7 +894,7 @@ export function createBackrunEngine(config: BackrunConfig) {
             hadUsableCounterpart = true;
             const dlmmMeta = makeDlmmMeta(dlmmPool, otherSnapRes.snapshot);
 
-            const poolAState = victimResult.newPoolState as PumpSwapPool;
+            const poolAState = poolAStateBase;
             for (const input of adaptiveSizes) {
                 stats.candidateEvaluations++;
 
@@ -1153,8 +1206,34 @@ export function createBackrunEngine(config: BackrunConfig) {
             recordSkip(canaryBlock, update, counterpart.pairKey);
             return;
         }
+        const structuralOpportunityKey = `${counterpart.pairKey}|${best.venueRoute}|${best.inputLamports.toString()}|${swap1MinOut.toString()}|${swap2MinOut.toString()}|${bestPoolHex ?? ''}`;
+        const structuralDupBlock = reserveOpportunityKey(structuralOpportunityKey);
+        if (structuralDupBlock) {
+            recordSkip('duplicate_structural_opportunity_suppressed', update, counterpart.pairKey);
+            return;
+        }
+        const opportunityKey = `${toHex(update.signature)}|${counterpart.pairKey}|${best.venueRoute}|${best.inputLamports.toString()}`;
+        const dupBlock = reserveOpportunityKey(opportunityKey);
+        if (dupBlock) {
+            recordSkip(dupBlock, update, counterpart.pairKey);
+            return;
+        }
+        const ageBaseMs = receivedAtMs ?? Date.now();
+        if (maxOpportunityAgeMs > 0 && Date.now() - ageBaseMs > maxOpportunityAgeMs) {
+            recordSkip('opportunity_stale_before_submit', update, counterpart.pairKey);
+            return;
+        }
+        const submitRateBlock = reserveSubmissionSlot();
+        if (submitRateBlock) {
+            recordSkip(submitRateBlock, update, counterpart.pairKey);
+            return;
+        }
 
         void (async () => {
+            if (maxOpportunityAgeMs > 0 && Date.now() - ageBaseMs > maxOpportunityAgeMs) {
+                recordSkip('opportunity_stale_at_submit', update, counterpart.pairKey);
+                return;
+            }
             let submitBundle = builtBundle;
             if (config.refreshRecentBlockhash) {
                 const refreshed = await config.refreshRecentBlockhash();
@@ -1299,6 +1378,11 @@ export function createBackrunEngine(config: BackrunConfig) {
                 maybeWriteShadowSummary();
                 return;
             }
+            if (!reserveSubmittedBundleId(finalResult.bundleId)) {
+                bumpReason(stats.skipReasons, 'submit_duplicate_bundle_id');
+                maybeWriteShadowSummary();
+                return;
+            }
             stats.bundlesSubmitted++;
             stats.totalProfitLamports += best!.netLamports;
             maybeWriteShadowSummary();
@@ -1311,6 +1395,7 @@ export function createBackrunEngine(config: BackrunConfig) {
         leg: SwapLeg,
         update: TxUpdate,
         decodedTx?: { accountKeys: Uint8Array[]; instructions?: import('../types.js').CompiledInstruction[] },
+        receivedAtMs?: number,
     ): void {
         const poolEntry = config.poolCache.get(leg.pool);
         if (!poolEntry) return;
@@ -1475,8 +1560,28 @@ export function createBackrunEngine(config: BackrunConfig) {
             recordSkip(canaryBlock, update);
             return;
         }
+        const opportunityKey = `${toHex(update.signature)}|legacy|${toHex(leg.pool)}|${bestInput.toString()}`;
+        const dupBlock = reserveOpportunityKey(opportunityKey);
+        if (dupBlock) {
+            recordSkip(dupBlock, update);
+            return;
+        }
+        const ageBaseMs = receivedAtMs ?? Date.now();
+        if (maxOpportunityAgeMs > 0 && Date.now() - ageBaseMs > maxOpportunityAgeMs) {
+            recordSkip('opportunity_stale_before_submit', update);
+            return;
+        }
+        const submitRateBlock = reserveSubmissionSlot();
+        if (submitRateBlock) {
+            recordSkip(submitRateBlock, update);
+            return;
+        }
 
         void (async () => {
+            if (maxOpportunityAgeMs > 0 && Date.now() - ageBaseMs > maxOpportunityAgeMs) {
+                recordSkip('opportunity_stale_at_submit', update);
+                return;
+            }
             let submitBundle = builtBundle;
             if (config.refreshRecentBlockhash) {
                 const refreshed = await config.refreshRecentBlockhash();
@@ -1543,6 +1648,10 @@ export function createBackrunEngine(config: BackrunConfig) {
                 if (classified) {
                     bumpReason(stats.skipReasons, classified);
                 }
+                return;
+            }
+            if (!reserveSubmittedBundleId(finalResult.bundleId)) {
+                bumpReason(stats.skipReasons, 'submit_duplicate_bundle_id');
                 return;
             }
             stats.bundlesSubmitted++;

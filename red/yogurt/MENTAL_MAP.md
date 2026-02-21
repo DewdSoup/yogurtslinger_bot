@@ -54,7 +54,7 @@ This document captures the architectural design, data flow, and strategic ration
 │  - Source of truth for all downstream operations       │                   │
 │  - Eliminates RPC calls on hot path                    │                   │
 │                                                         │                   │
-│  CACHE: PumpSwap, RaydiumV4 VALIDATED.                 │                   │
+│  CACHE: PumpSwap, RaydiumV4, MeteoraDlmm VALIDATED.    │                   │
 │  See: docs/validation/LOCAL_CACHE_VALIDATION.md        │                   │
 │                                                         │                   │
 │  NEVER MUTATED BY EXECUTION PIPELINE                   │                   │
@@ -92,7 +92,7 @@ This document captures the architectural design, data flow, and strategic ration
             ▼
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                    LAYER 3: EXECUTION PIPELINE                                │
-│                    (Future - Not Started)                                     │
+│                    (In Progress - Execution Correctness Blockers)             │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │                                                                               │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐  │

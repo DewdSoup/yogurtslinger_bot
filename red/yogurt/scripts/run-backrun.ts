@@ -19,6 +19,7 @@ import { createJitoClient } from '../src/execute/submit.js';
 import { setMintProgramOverride } from '../src/execute/bundle.js';
 import { createAltCache } from '../src/cache/alt.js';
 import { createAltGrpcFetcher } from '../src/pending/altGrpcFetcher.js';
+import { appendToHotlist } from '../src/pending/altFetcher.js';
 
 const CANONICAL_KEY_DIR = '/home/dudesoup/jito/keys';
 const DEFAULT_HOT_KEY = `${CANONICAL_KEY_DIR}/yogurtslinger-hot.json`;
@@ -34,6 +35,10 @@ const GRPC_ENDPOINT = process.env.GRPC_ENDPOINT ?? '127.0.0.1:10000';
 const SHRED_ENDPOINT = process.env.SHRED_ENDPOINT ?? '127.0.0.1:11000';
 const RPC_ENDPOINT = process.env.RPC_ENDPOINT ?? 'http://127.0.0.1:8899';
 const BLOCKHASH_RPC_ENDPOINT = process.env.BLOCKHASH_RPC_ENDPOINT ?? RPC_ENDPOINT;
+const BLOCKHASH_RPC_ENDPOINTS = (process.env.BLOCKHASH_RPC_ENDPOINTS ?? BLOCKHASH_RPC_ENDPOINT)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
 const JITO_ENDPOINT = process.env.JITO_ENDPOINT ?? 'mainnet.block-engine.jito.wtf';
 
 const ALLOW_NON_CANONICAL_KEYS = process.env.ALLOW_NON_CANONICAL_KEYS === '1';
@@ -58,6 +63,9 @@ const MAX_NET_TO_INPUT_BPS = Number(process.env.MAX_NET_TO_INPUT_BPS ?? '20000')
 const MAX_ABS_NET_SOL = Number(process.env.MAX_ABS_NET_SOL ?? '5');
 const CANARY_MAX_INPUT_SOL = Number(process.env.CANARY_MAX_INPUT_SOL ?? '0');
 const CANARY_MAX_SUBMISSIONS_PER_HOUR = Number(process.env.CANARY_MAX_SUBMISSIONS_PER_HOUR ?? '0');
+const MAX_SUBMISSIONS_PER_SECOND = Number(process.env.MAX_SUBMISSIONS_PER_SECOND ?? '4');
+const DUPLICATE_OPPORTUNITY_TTL_MS = Number(process.env.DUPLICATE_OPPORTUNITY_TTL_MS ?? '2500');
+const MAX_OPPORTUNITY_AGE_MS = Number(process.env.MAX_OPPORTUNITY_AGE_MS ?? '1500');
 const MAX_WALLET_DRAWDOWN_SOL = Number(process.env.MAX_WALLET_DRAWDOWN_SOL ?? '0');
 const PHASE3_TICK_ARRAY_RADIUS = Number(process.env.PHASE3_TICK_ARRAY_RADIUS ?? '7');
 const PHASE3_BIN_ARRAY_RADIUS = Number(process.env.PHASE3_BIN_ARRAY_RADIUS ?? '7');
@@ -66,9 +74,14 @@ const BACKRUN_SIZE_CANDIDATES_SOL = process.env.BACKRUN_SIZE_CANDIDATES_SOL ?? '
 const INCLUDE_VICTIM_TX = process.env.INCLUDE_VICTIM_TX === '1';
 const ALT_GRPC_LOG_LEVEL = process.env.ALT_GRPC_LOG_LEVEL ?? 'info';
 const ALT_GRPC_SUMMARY_INTERVAL_MS = Number(process.env.ALT_GRPC_SUMMARY_INTERVAL_MS ?? '30000');
+const ALT_RPC_FALLBACK = (process.env.ALT_RPC_FALLBACK ?? '1') !== '0';
+const ALT_HOTLIST_PATH = process.env.ALT_HOTLIST_PATH ?? 'data/alt-hotlist.json';
+const ALT_HOTLIST_PREWARM_LIMIT = Number(process.env.ALT_HOTLIST_PREWARM_LIMIT ?? '4000');
+const ALT_HOTLIST_PREWARM_CONCURRENCY = Number(process.env.ALT_HOTLIST_PREWARM_CONCURRENCY ?? '32');
 const BLOCKHASH_SLOT_LAG_WARN = Number(process.env.BLOCKHASH_SLOT_LAG_WARN ?? '150');
 const BLOCKHASH_REFRESH_INTERVAL_MS = Number(process.env.BLOCKHASH_REFRESH_INTERVAL_MS ?? '2000');
 const BLOCKHASH_MIN_REFRESH_INTERVAL_MS = Number(process.env.BLOCKHASH_MIN_REFRESH_INTERVAL_MS ?? '1200');
+const BLOCKHASH_MAX_STALE_MS = Number(process.env.BLOCKHASH_MAX_STALE_MS ?? '12000');
 
 function installPipeErrorGuards(): void {
     const onStreamError = (err: NodeJS.ErrnoException) => {
@@ -117,6 +130,20 @@ function appendJsonl(filePath: string, payload: unknown): void {
     appendFileSync(filePath, `${JSON.stringify(payload)}\n`);
 }
 
+function loadAltHotlist(pathOrFile: string): string[] {
+    try {
+        const raw = readFileSync(pathOrFile, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.alts)) {
+            return parsed.alts.filter((v: unknown): v is string => typeof v === 'string');
+        }
+        if (Array.isArray(parsed)) {
+            return parsed.filter((v: unknown): v is string => typeof v === 'string');
+        }
+    } catch {}
+    return [];
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -133,18 +160,43 @@ async function main() {
     const rpcConn = !DRY_RUN
         ? new Connection(RPC_ENDPOINT, 'processed')
         : null;
-    const blockhashConn = !DRY_RUN
-        ? new Connection(BLOCKHASH_RPC_ENDPOINT, 'processed')
-        : null;
+    const blockhashConns = !DRY_RUN
+        ? BLOCKHASH_RPC_ENDPOINTS.map(ep => ({
+            endpoint: ep,
+            conn: new Connection(ep, {
+                commitment: 'processed',
+                disableRetryOnRateLimit: true,
+            }),
+        }))
+        : [];
+    let blockhashConnCursor = 0;
     let startWalletBalanceLamports: bigint | null = null;
     let latestWalletBalanceLamports: bigint | null = null;
     let latestRpcBlockhash: string | null = null;
     let latestRpcBlockhashUpdatedAtMs = 0;
+    let latestRpcBlockhashSource = '';
 
-    const setLatestBlockhash = (blockhash: string): void => {
+    const setLatestBlockhash = (blockhash: string, source = ''): void => {
         latestRpcBlockhash = blockhash;
         latestRpcBlockhashUpdatedAtMs = Date.now();
+        if (source) latestRpcBlockhashSource = source;
     };
+
+    async function fetchLatestBlockhashFromAny(): Promise<{ blockhash: string; endpoint: string } | null> {
+        if (blockhashConns.length === 0) return null;
+        for (let i = 0; i < blockhashConns.length; i++) {
+            const idx = (blockhashConnCursor + i) % blockhashConns.length;
+            const target = blockhashConns[idx]!;
+            try {
+                const latest = await target.conn.getLatestBlockhash('processed');
+                blockhashConnCursor = (idx + 1) % blockhashConns.length;
+                return { blockhash: latest.blockhash, endpoint: target.endpoint };
+            } catch {
+                continue;
+            }
+        }
+        return null;
+    }
 
     const runBundleResultsJsonl = !DRY_RUN ? path.join(liveRunDir, 'bundle-results.jsonl') : '';
     if (!DRY_RUN) {
@@ -203,13 +255,59 @@ async function main() {
     const altFetcher = createAltGrpcFetcher({
         endpoint: GRPC_ENDPOINT,
         altCache,
+        hotlistPath: ALT_HOTLIST_PATH,
     });
+    const altRpcConn = ALT_RPC_FALLBACK ? new Connection(RPC_ENDPOINT, 'processed') : null;
+    let altRpcFetched = 0;
+    let altRpcFailed = 0;
     altCache.setFetcher(async (pubkey: Uint8Array) => {
         altFetcher.requestAlt(pubkey);
-        return null;
+        if (!altRpcConn) return null;
+        try {
+            const pk = new PublicKey(pubkey);
+            const lookup = await altRpcConn.getAddressLookupTable(pk);
+            if (!lookup.value) return null;
+            const alt = {
+                pubkey,
+                addresses: lookup.value.state.addresses.map(a => a.toBytes()),
+                slot: lookup.context.slot,
+            };
+            altCache.set(pubkey, alt);
+            appendToHotlist(ALT_HOTLIST_PATH, pk.toBase58());
+            altRpcFetched++;
+            return alt;
+        } catch {
+            altRpcFailed++;
+            return null;
+        }
     });
     await altFetcher.start();
-    console.log('[backrun] ALT fetcher active (gRPC, non-blocking)');
+    console.log(
+        `[backrun] ALT fetcher active (mode=${ALT_RPC_FALLBACK ? 'hybrid_grpc_rpc' : 'grpc_only'}, non-blocking)`,
+    );
+    const hotlistAlts = loadAltHotlist(ALT_HOTLIST_PATH)
+        .slice(0, Math.max(0, Math.floor(ALT_HOTLIST_PREWARM_LIMIT)));
+    if (hotlistAlts.length > 0) {
+        const conc = Math.max(1, Math.floor(ALT_HOTLIST_PREWARM_CONCURRENCY));
+        console.log(
+            `[backrun] ALT hotlist prewarm queued=${hotlistAlts.length} ` +
+            `path=${ALT_HOTLIST_PATH} conc=${conc}`,
+        );
+        void (async () => {
+            let idx = 0;
+            const worker = async () => {
+                while (true) {
+                    const i = idx++;
+                    if (i >= hotlistAlts.length) break;
+                    try {
+                        await altCache.getAsync(new PublicKey(hotlistAlts[i]!).toBytes());
+                    } catch {}
+                }
+            };
+            await Promise.all(Array.from({ length: conc }, () => worker()));
+            console.log('[backrun] ALT hotlist prewarm complete');
+        })().catch(() => {});
+    }
 
     const jitoClient = createJitoClient({
         endpoint: JITO_ENDPOINT,
@@ -245,20 +343,25 @@ async function main() {
             console.warn(`[backrun] wallet drawdown guard disabled (balance fetch failed): ${String(err)}`);
         }
         try {
-            const latest = await blockhashConn!.getLatestBlockhash('processed');
-            setLatestBlockhash(latest.blockhash);
+            const latest = await fetchLatestBlockhashFromAny();
+            if (!latest) {
+                throw new Error('all blockhash endpoints failed');
+            }
+            setLatestBlockhash(latest.blockhash, latest.endpoint);
             console.log(
                 `[backrun] blockhash source warm=${latestRpcBlockhash.slice(0, 12)}... ` +
-                `endpoint=${BLOCKHASH_RPC_ENDPOINT}`,
+                `endpoint=${latest.endpoint}`,
             );
         } catch (err) {
-            console.warn(`[backrun] blockhash source warm failed (${BLOCKHASH_RPC_ENDPOINT}): ${String(err)}`);
+            console.warn(
+                `[backrun] blockhash source warm failed (${BLOCKHASH_RPC_ENDPOINTS.join(',')}): ${String(err)}`,
+            );
         }
-        if (BLOCKHASH_RPC_ENDPOINT !== RPC_ENDPOINT) {
+        if (blockhashConns.length > 0 && BLOCKHASH_RPC_ENDPOINTS[0] !== RPC_ENDPOINT) {
             try {
                 const [localSlot, blockhashSlot] = await Promise.all([
                     rpcConn.getSlot('processed'),
-                    blockhashConn!.getSlot('processed'),
+                    blockhashConns[0]!.conn.getSlot('processed'),
                 ]);
                 const lag = blockhashSlot - localSlot;
                 if (lag > BLOCKHASH_SLOT_LAG_WARN) {
@@ -328,6 +431,7 @@ async function main() {
                 altGrpcSummaryIntervalMs: ALT_GRPC_SUMMARY_INTERVAL_MS,
                 blockhashRefreshIntervalMs: BLOCKHASH_REFRESH_INTERVAL_MS,
                 blockhashMinRefreshIntervalMs: BLOCKHASH_MIN_REFRESH_INTERVAL_MS,
+                blockhashMaxStaleMs: BLOCKHASH_MAX_STALE_MS,
                 bundleResultsPath: runBundleResultsJsonl,
                 includeTopologyFrozenPools: INCLUDE_TOPOLOGY_FROZEN_POOLS,
                 phase3TickArrayRadius: PHASE3_TICK_ARRAY_RADIUS,
@@ -339,6 +443,7 @@ async function main() {
                 shred: SHRED_ENDPOINT,
                 rpc: RPC_ENDPOINT,
                 blockhashRpc: BLOCKHASH_RPC_ENDPOINT,
+                blockhashRpcs: BLOCKHASH_RPC_ENDPOINTS,
                 jito: JITO_ENDPOINT,
             },
             keys: {
@@ -358,6 +463,9 @@ async function main() {
                 maxAbsNetSol: MAX_ABS_NET_SOL,
                 canaryMaxInputSol: CANARY_MAX_INPUT_SOL,
                 canaryMaxSubmissionsPerHour: CANARY_MAX_SUBMISSIONS_PER_HOUR,
+                maxSubmissionsPerSecond: MAX_SUBMISSIONS_PER_SECOND,
+                duplicateOpportunityTtlMs: DUPLICATE_OPPORTUNITY_TTL_MS,
+                maxOpportunityAgeMs: MAX_OPPORTUNITY_AGE_MS,
                 maxWalletDrawdownSol: MAX_WALLET_DRAWDOWN_SOL,
                 maxStateLagSlots: MAX_STATE_LAG_SLOTS,
             },
@@ -392,6 +500,9 @@ async function main() {
         maxAbsoluteNetLamports: BigInt(Math.floor(MAX_ABS_NET_SOL * 1e9)),
         canaryMaxInputLamports: BigInt(Math.floor(Math.max(0, CANARY_MAX_INPUT_SOL) * 1e9)),
         canaryMaxSubmissionsPerHour: Math.max(0, Math.floor(CANARY_MAX_SUBMISSIONS_PER_HOUR)),
+        maxSubmissionsPerSecond: Math.max(0, Math.floor(MAX_SUBMISSIONS_PER_SECOND)),
+        duplicateOpportunityTtlMs: Math.max(0, Math.floor(DUPLICATE_OPPORTUNITY_TTL_MS)),
+        maxOpportunityAgeMs: Math.max(0, Math.floor(MAX_OPPORTUNITY_AGE_MS)),
         strictSlotConsistency: true,
         includeVictimTx: INCLUDE_VICTIM_TX,
         getRecentBlockhash: () => {
@@ -399,7 +510,7 @@ async function main() {
             const cached = grpcConsumer.getCachedBlockhash();
             return cached ? cached.blockhash : bh.blockhash;
         },
-        refreshRecentBlockhash: !DRY_RUN && blockhashConn
+        refreshRecentBlockhash: !DRY_RUN && blockhashConns.length > 0
             ? async (force?: boolean) => {
                 if (
                     !force &&
@@ -409,13 +520,19 @@ async function main() {
                 ) {
                     return latestRpcBlockhash;
                 }
-                try {
-                    const latest = await blockhashConn.getLatestBlockhash('processed');
-                    setLatestBlockhash(latest.blockhash);
+                const latest = await fetchLatestBlockhashFromAny();
+                if (latest) {
+                    setLatestBlockhash(latest.blockhash, latest.endpoint);
                     return latestRpcBlockhash;
-                } catch {
-                    return null;
                 }
+                if (
+                    latestRpcBlockhash &&
+                    latestRpcBlockhashUpdatedAtMs > 0 &&
+                    Date.now() - latestRpcBlockhashUpdatedAtMs <= BLOCKHASH_MAX_STALE_MS
+                ) {
+                    return latestRpcBlockhash;
+                }
+                return null;
             }
             : undefined,
         dryRun: DRY_RUN,
@@ -438,10 +555,10 @@ async function main() {
         if (BLOCKHASH_REFRESH_INTERVAL_MS > 0) {
             const blockhashRefreshInterval = setInterval(() => {
                 void (async () => {
-                    try {
-                        const latest = await blockhashConn!.getLatestBlockhash('processed');
-                        setLatestBlockhash(latest.blockhash);
-                    } catch {}
+                    const latest = await fetchLatestBlockhashFromAny();
+                    if (latest) {
+                        setLatestBlockhash(latest.blockhash, latest.endpoint);
+                    }
                 })();
             }, BLOCKHASH_REFRESH_INTERVAL_MS);
             blockhashRefreshInterval.unref();
@@ -455,9 +572,13 @@ async function main() {
     console.log(`[backrun] shredstream connected → ${SHRED_ENDPOINT}`);
     console.log(`[backrun] strategy=${STRATEGY_MODE} dryRun=${DRY_RUN ? '1' : '0'}`);
     console.log(`[backrun] includeVictimTx=${INCLUDE_VICTIM_TX ? '1' : '0'}`);
-    console.log(`[backrun] blockhashRpc=${BLOCKHASH_RPC_ENDPOINT}`);
+    console.log(`[backrun] blockhashRpc=${BLOCKHASH_RPC_ENDPOINTS.join(',')}`);
     console.log(`[backrun] blockhashRefreshIntervalMs=${BLOCKHASH_REFRESH_INTERVAL_MS}`);
     console.log(`[backrun] blockhashMinRefreshIntervalMs=${BLOCKHASH_MIN_REFRESH_INTERVAL_MS}`);
+    console.log(`[backrun] blockhashMaxStaleMs=${BLOCKHASH_MAX_STALE_MS}`);
+    if (latestRpcBlockhashSource) {
+        console.log(`[backrun] blockhashSourceActive=${latestRpcBlockhashSource}`);
+    }
     console.log(`[backrun] altGrpcLogLevel=${ALT_GRPC_LOG_LEVEL} altGrpcSummaryIntervalMs=${ALT_GRPC_SUMMARY_INTERVAL_MS}`);
     console.log(
         `[backrun] phase3 radii tick=${PHASE3_TICK_ARRAY_RADIUS} bin=${PHASE3_BIN_ARRAY_RADIUS} ` +
@@ -471,6 +592,10 @@ async function main() {
     console.log(
         `[backrun] canary gates maxInputSol=${CANARY_MAX_INPUT_SOL} ` +
         `maxSubmissionsPerHour=${CANARY_MAX_SUBMISSIONS_PER_HOUR}`,
+    );
+    console.log(
+        `[backrun] submit gates maxPerSecond=${MAX_SUBMISSIONS_PER_SECOND} ` +
+        `dupTtlMs=${DUPLICATE_OPPORTUNITY_TTL_MS} maxOpportunityAgeMs=${MAX_OPPORTUNITY_AGE_MS}`,
     );
     if (!DRY_RUN) {
         console.log(`[backrun] live risk guard maxWalletDrawdownSol=${MAX_WALLET_DRAWDOWN_SOL}`);
@@ -569,6 +694,9 @@ async function main() {
         const submitRateLimited = s.skipReasons.submit_rate_limited ?? 0n;
         const submitRetryFreshOk = s.skipReasons.submit_retry_fresh_blockhash_success ?? 0n;
         const submitRetryFreshFail = s.skipReasons.submit_retry_fresh_blockhash_failed ?? 0n;
+        const submitRateGovernor = s.skipReasons.submit_rate_governor ?? 0n;
+        const submitDupSuppressed = s.skipReasons.duplicate_opportunity_suppressed ?? 0n;
+        const submitStale = (s.skipReasons.opportunity_stale_before_submit ?? 0n) + (s.skipReasons.opportunity_stale_at_submit ?? 0n);
         const j = DRY_RUN
             ? {
                 bundlesLanded: 0n,
@@ -593,17 +721,19 @@ async function main() {
             } catch {}
         }
         console.log(
-            `[stats] strategy=${s.strategyMode} shred_txs=${s.shredTxsReceived} decode_fail=${s.pendingDecodeFailures} ` +
+            `[stats] strategy=${s.strategyMode} shred_txs=${s.shredTxsReceived} decode_fail=${s.pendingDecodeFailures} alt_miss=${s.pendingAltMisses} ` +
             `swaps=${s.swapsDetected} candidates=${s.candidateEvaluations} routes=${s.routeEvaluations} ` +
             `opps=${s.opportunitiesFound} built=${s.bundlesBuilt} submitted=${s.bundlesSubmitted} finalized=${j.bundlesLanded} ` +
             `accepted=${j.bundlesAccepted} rejected=${j.bundlesRejected} dropped=${j.bundlesDropped} ` +
             `submit_fail=${submitFailed} exp_bh=${submitExpiredBh} rl=${submitRateLimited} ` +
             `retry_bh_ok=${submitRetryFreshOk} retry_bh_fail=${submitRetryFreshFail} ` +
+            `gov=${submitRateGovernor} dup=${submitDupSuppressed} stale=${submitStale} ` +
             `pred_profit=${(Number(s.totalProfitLamports) / 1e9).toFixed(6)}SOL ` +
             `wallet_net=${walletNetLamports !== null ? (Number(walletNetLamports) / 1e9).toFixed(6) : 'n/a'}SOL ` +
             `pairs=${s.pairIndex.trackedPairs} pools=${s.pairIndex.trackedPools} ` +
             `cachePools=${p3.poolCacheSize} cacheVaults=${p3.vaultCacheSize} ` +
-            `alt_req=${alt.altsRequested} alt_ok=${alt.altsFetched} alt_pending=${alt.pendingRequests}`,
+            `alt_req=${alt.altsRequested} alt_ok=${alt.altsFetched} alt_rpc_ok=${altRpcFetched} ` +
+            `alt_rpc_fail=${altRpcFailed} alt_pending=${alt.pendingRequests}`,
         );
         if (!DRY_RUN && runStatsJsonl && runStatsLatest) {
             const payload = {
@@ -613,6 +743,7 @@ async function main() {
                 counters: {
                     shredTxsReceived: s.shredTxsReceived.toString(),
                     decodeFailures: s.pendingDecodeFailures.toString(),
+                    decodeAltMisses: s.pendingAltMisses.toString(),
                     swapsDetected: s.swapsDetected.toString(),
                     candidateEvaluations: s.candidateEvaluations.toString(),
                     routeEvaluations: s.routeEvaluations.toString(),
@@ -628,6 +759,8 @@ async function main() {
                     cacheVaults: p3.vaultCacheSize,
                     altsRequested: alt.altsRequested.toString(),
                     altsFetched: alt.altsFetched.toString(),
+                    altsRpcFetched: String(altRpcFetched),
+                    altsRpcFailed: String(altRpcFailed),
                 },
                 jito: {
                     bundlesSent: j.bundlesSent.toString(),

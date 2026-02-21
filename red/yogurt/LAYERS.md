@@ -80,7 +80,7 @@ Pool decoders populate the cache. Instruction decoders parse transactions for ev
 | PumpSwap | **VALIDATED** | `docs/validation/LOCAL_CACHE_VALIDATION.md` |
 | RaydiumV4 | **VALIDATED** | `docs/validation/LOCAL_CACHE_VALIDATION.md` |
 | RaydiumClmm | NOT_TESTED | - |
-| MeteoraDlmm | NOT_TESTED | - |
+| MeteoraDlmm | **VALIDATED** | `data/evidence/prove-dlmm-l2-*.json` |
 
 ### Current Reality
 **Layer 1 infrastructure EXISTS but has GAPS.** The gaps are:
@@ -247,7 +247,7 @@ A venue is proven when Layer 1 infrastructure:
 This is where active development is focused. See `CURRENT_STATE.json` for specific task status.
 
 ### Status
-In progress. PumpSwap has known gaps being worked on. Other venues not started.
+PumpSwap, RaydiumV4, MeteoraDlmm proven. RaydiumClmm not started.
 
 ---
 
@@ -271,13 +271,14 @@ Detect profitable opportunities and execute them via Jito bundles.
 - Does NOT store persistent state
 - Does NOT handle prediction of future state (that is Layer 4)
 
-### Key Files (Not Yet Implemented)
+### Key Files
 | File | Purpose |
 |------|---------|
-| `src/execute/bundle.ts` | Bundle construction (stub exists) |
-| `src/execute/submit.ts` | Jito submission (stub exists) |
-| `src/execute/instruction/*.ts` | Per-venue instruction builders (not yet created) |
-| `src/opportunity/*.ts` | Opportunity detection (not yet created) |
+| `src/execute/backrun.ts` | Backrun detection + execution engine (cross-venue + legacy CPMM) |
+| `src/execute/bundle.ts` | Bundle construction (PumpSwap, RaydiumV4, MeteoraDlmm) |
+| `src/execute/submit.ts` | Jito submission with retry and result tracking |
+| `src/execute/pairIndex.ts` | O(1) cross-venue counterpart lookup |
+| `scripts/run-backrun.ts` | Runtime entrypoint (config, lifecycle, telemetry) |
 | `src/decode/programs/*.ts` | **Instruction decoders** - used to decode victim transactions from shreds |
 | `src/decode/swap.ts` | `extractSwapLegs()` - extracts swap details from pending transactions |
 
@@ -295,7 +296,7 @@ Detect profitable opportunities and execute them via Jito bundles.
 Layer 1 must be proven reliable via Layer 2 before Layer 3 development begins.
 
 ### Status
-Not started. Stubs exist for bundle building and submission but throw "not implemented" errors.
+In progress. cross_venue_ps_dlmm strategy functional end-to-end. Execution correctness blockers prevent landed bundles (token program mismatch in bundle construction). See CURRENT_STATE.json for specific blockers.
 
 ---
 
